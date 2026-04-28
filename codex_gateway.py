@@ -12,9 +12,11 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -220,6 +222,40 @@ def _resolve_repo_path(path: str) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Illegal path") from exc
     return target
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+
+
+def _find_state_db() -> Path | None:
+    home = _codex_home()
+    candidates = sorted(home.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def _to_iso(ts: int | None) -> str | None:
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=UTC).isoformat()
+    except Exception:
+        return None
+
+
+def _query_state_db(sql: str, args: tuple = ()) -> tuple[Path, list[sqlite3.Row]]:
+    state_db = _find_state_db()
+    if state_db is None:
+        raise HTTPException(status_code=404, detail="Codex state DB not found")
+    conn = sqlite3.connect(state_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = list(conn.execute(sql, args))
+    finally:
+        conn.close()
+    return state_db, rows
 
 
 def _run_command(cmd: list[str], cwd: Path, timeout: int) -> dict:
@@ -522,6 +558,126 @@ async def healthz() -> dict:
             "running": managed_running,
             "pid": MANAGED_APP_SERVER_PROCESS.pid if managed_running and MANAGED_APP_SERVER_PROCESS else None,
             "listen_url": MANAGED_APP_SERVER_LISTEN_URL,
+        },
+    }
+
+
+@app.get("/projects")
+async def list_projects(limit: int = Query(default=200, ge=1, le=5000)) -> dict:
+    sql = """
+    SELECT
+      cwd,
+      COUNT(*) AS thread_count,
+      MAX(updated_at) AS last_updated_at
+    FROM threads
+    WHERE archived = 0
+      AND cwd IS NOT NULL
+      AND cwd != ''
+    GROUP BY cwd
+    ORDER BY last_updated_at DESC
+    LIMIT ?
+    """
+    state_db, rows = _query_state_db(sql, (limit,))
+    data = []
+    for row in rows:
+        cwd = row["cwd"]
+        data.append(
+            {
+                "project_id": cwd,
+                "cwd": cwd,
+                "name": Path(cwd).name or cwd,
+                "thread_count": int(row["thread_count"] or 0),
+                "last_updated_at": _to_iso(row["last_updated_at"]),
+            }
+        )
+    return {"state_db": str(state_db), "data": data}
+
+
+@app.get("/threads")
+async def list_threads(
+    cwd: str | None = Query(default=None, description="Exact project folder path"),
+    limit: int = Query(default=100, ge=1, le=5000),
+) -> dict:
+    sql_base = """
+    SELECT
+      id,
+      title,
+      cwd,
+      updated_at,
+      created_at,
+      model_provider,
+      model,
+      reasoning_effort,
+      first_user_message
+    FROM threads
+    WHERE archived = 0
+    """
+    args: list = []
+    if cwd:
+        sql_base += " AND cwd = ?"
+        args.append(cwd)
+    sql_base += " ORDER BY updated_at DESC LIMIT ?"
+    args.append(limit)
+    state_db, rows = _query_state_db(sql_base, tuple(args))
+    data = []
+    for row in rows:
+        title = row["title"] or ""
+        first_msg = row["first_user_message"] or ""
+        preview = title if title else first_msg
+        preview = preview[:220]
+        data.append(
+            {
+                "thread_id": row["id"],
+                "title": title,
+                "preview": preview,
+                "cwd": row["cwd"],
+                "created_at": _to_iso(row["created_at"]),
+                "updated_at": _to_iso(row["updated_at"]),
+                "model_provider": row["model_provider"],
+                "model": row["model"],
+                "reasoning_effort": row["reasoning_effort"],
+            }
+        )
+    return {"state_db": str(state_db), "data": data}
+
+
+@app.get("/threads/{thread_id}")
+async def get_thread(thread_id: str) -> dict:
+    sql = """
+    SELECT
+      id,
+      title,
+      cwd,
+      created_at,
+      updated_at,
+      model_provider,
+      model,
+      reasoning_effort,
+      first_user_message
+    FROM threads
+    WHERE id = ?
+    LIMIT 1
+    """
+    state_db, rows = _query_state_db(sql, (thread_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    row = rows[0]
+    title = row["title"] or ""
+    first_msg = row["first_user_message"] or ""
+    preview = title if title else first_msg
+    preview = preview[:400]
+    return {
+        "state_db": str(state_db),
+        "thread": {
+            "thread_id": row["id"],
+            "title": title,
+            "preview": preview,
+            "cwd": row["cwd"],
+            "created_at": _to_iso(row["created_at"]),
+            "updated_at": _to_iso(row["updated_at"]),
+            "model_provider": row["model_provider"],
+            "model": row["model"],
+            "reasoning_effort": row["reasoning_effort"],
         },
     }
 

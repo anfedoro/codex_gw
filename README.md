@@ -138,3 +138,25 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
 
 - `gpt_action_schema.template.json`: OpenAPI schema template for Custom GPT Actions.
 - `gpt_system_instruction.template.txt`: system instruction template for the Custom GPT.
+
+## Project/Thread Discovery
+
+The gateway supports project and thread discovery based on local Codex state:
+
+- `GET /projects`
+  - Returns projects grouped by `cwd` (project folder).
+  - Includes thread count and latest update time.
+
+- `GET /threads?cwd=<absolute_folder_path>&limit=<n>`
+  - Returns threads sorted by most recent update.
+  - If `cwd` is provided, returns only threads for that project.
+
+- `GET /threads/{thread_id}`
+  - Returns metadata for a single thread.
+
+Recommended GPT flow:
+1. Call `getProjects`.
+2. Ask user to select a project folder or request a new thread.
+3. Call `getThreads` filtered by selected `cwd`.
+4. Ask user which thread to resume.
+5. Call `runCodexTask` with `kind="resume"` and selected `session_id`.

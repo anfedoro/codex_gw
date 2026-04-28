@@ -141,6 +141,62 @@
           }
         },
         "additionalProperties": true
+      },
+      "ProjectItem": {
+        "type": "object",
+        "properties": {
+          "project_id": { "type": "string" },
+          "cwd": { "type": "string" },
+          "name": { "type": "string" },
+          "thread_count": { "type": "integer" },
+          "last_updated_at": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      },
+      "ProjectsResponse": {
+        "type": "object",
+        "properties": {
+          "state_db": { "type": "string" },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ProjectItem" }
+          }
+        },
+        "additionalProperties": true
+      },
+      "ThreadItem": {
+        "type": "object",
+        "properties": {
+          "thread_id": { "type": "string" },
+          "title": { "type": "string" },
+          "preview": { "type": "string" },
+          "cwd": { "type": "string" },
+          "created_at": { "type": ["string", "null"] },
+          "updated_at": { "type": ["string", "null"] },
+          "model_provider": { "type": ["string", "null"] },
+          "model": { "type": ["string", "null"] },
+          "reasoning_effort": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      },
+      "ThreadsResponse": {
+        "type": "object",
+        "properties": {
+          "state_db": { "type": "string" },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ThreadItem" }
+          }
+        },
+        "additionalProperties": true
+      },
+      "ThreadByIdResponse": {
+        "type": "object",
+        "properties": {
+          "state_db": { "type": "string" },
+          "thread": { "$ref": "#/components/schemas/ThreadItem" }
+        },
+        "additionalProperties": true
       }
     }
   },
@@ -196,6 +252,86 @@
           "400": { "description": "Bad request" },
           "401": { "description": "Unauthorized" },
           "500": { "description": "Internal error" }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "operationId": "getProjects",
+        "summary": "List projects derived from Codex threads, grouped by cwd",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 200 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Projects list",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProjectsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads": {
+      "get": {
+        "operationId": "getThreads",
+        "summary": "List threads sorted by last update, optionally filtered by project cwd",
+        "parameters": [
+          {
+            "name": "cwd",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Exact project folder path"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Threads list",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ThreadsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/{thread_id}": {
+      "get": {
+        "operationId": "getThreadById",
+        "summary": "Get single thread metadata",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Thread metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ThreadByIdResponse" }
+              }
+            }
+          },
+          "404": { "description": "Thread not found" }
         }
       }
     }
