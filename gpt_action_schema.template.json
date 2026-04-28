@@ -168,8 +168,12 @@
         "type": "object",
         "properties": {
           "thread_id": { "type": "string" },
+          "short_thread_id": { "type": "string" },
+          "project_name": { "type": ["string", "null"] },
           "title": { "type": "string" },
+          "first_user_message": { "type": "string" },
           "preview": { "type": "string" },
+          "display_name": { "type": "string" },
           "cwd": { "type": "string" },
           "created_at": { "type": ["string", "null"] },
           "updated_at": { "type": ["string", "null"] },

@@ -245,6 +245,23 @@ def _to_iso(ts: int | None) -> str | None:
         return None
 
 
+def _single_line(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _short_text(text: str, limit: int = 120) -> str:
+    t = _single_line(text)
+    if len(t) <= limit:
+        return t
+    return t[: limit - 1].rstrip() + "…"
+
+
+def _thread_display_name(cwd: str | None, title: str, first_msg: str, thread_id: str) -> str:
+    project = Path(cwd).name if cwd else "project"
+    base = title or first_msg or thread_id
+    return f"{project}: {_short_text(base, 90)}"
+
+
 def _query_state_db(sql: str, args: tuple = ()) -> tuple[Path, list[sqlite3.Row]]:
     state_db = _find_state_db()
     if state_db is None:
@@ -623,13 +640,17 @@ async def list_threads(
     for row in rows:
         title = row["title"] or ""
         first_msg = row["first_user_message"] or ""
-        preview = title if title else first_msg
-        preview = preview[:220]
+        preview = _short_text(title if title else first_msg, 220)
+        display_name = _thread_display_name(row["cwd"], title, first_msg, row["id"])
         data.append(
             {
                 "thread_id": row["id"],
+                "short_thread_id": str(row["id"])[:8],
+                "project_name": Path(row["cwd"]).name if row["cwd"] else None,
                 "title": title,
+                "first_user_message": _short_text(first_msg, 220),
                 "preview": preview,
+                "display_name": display_name,
                 "cwd": row["cwd"],
                 "created_at": _to_iso(row["created_at"]),
                 "updated_at": _to_iso(row["updated_at"]),
@@ -664,14 +685,18 @@ async def get_thread(thread_id: str) -> dict:
     row = rows[0]
     title = row["title"] or ""
     first_msg = row["first_user_message"] or ""
-    preview = title if title else first_msg
-    preview = preview[:400]
+    preview = _short_text(title if title else first_msg, 400)
+    display_name = _thread_display_name(row["cwd"], title, first_msg, row["id"])
     return {
         "state_db": str(state_db),
         "thread": {
             "thread_id": row["id"],
+            "short_thread_id": str(row["id"])[:8],
+            "project_name": Path(row["cwd"]).name if row["cwd"] else None,
             "title": title,
+            "first_user_message": _short_text(first_msg, 400),
             "preview": preview,
+            "display_name": display_name,
             "cwd": row["cwd"],
             "created_at": _to_iso(row["created_at"]),
             "updated_at": _to_iso(row["updated_at"]),
