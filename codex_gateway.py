@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -33,6 +34,7 @@ APP_SERVER_URL = os.environ.get("APP_SERVER_URL", "ws://127.0.0.1:4500")
 APP_SERVER_BEARER_TOKEN = os.environ.get("APP_SERVER_BEARER_TOKEN")
 APP_SERVER_TIMEOUT_SECONDS = int(os.environ.get("APP_SERVER_TIMEOUT_SECONDS", "180"))
 GATEWAY_API_KEY = os.environ.get("CODEX_GATEWAY_API_KEY", "").strip()
+GATEWAY_API_KEY_HEADER = os.environ.get("GATEWAY_API_KEY_HEADER", "x-api-key").strip().lower()
 AUTH_DISABLED = os.environ.get("GATEWAY_DISABLE_AUTH", "0") == "1"
 DEBUG_MODE = os.environ.get("GATEWAY_DEBUG", "0") == "1"
 LOG_LEVEL = os.environ.get("GATEWAY_LOG_LEVEL", "INFO").upper()
@@ -88,6 +90,24 @@ def _extract_bearer_token(authorization_header: str | None) -> str | None:
     return token.strip()
 
 
+def _extract_api_key_from_request(request: Request) -> str | None:
+    bearer = _extract_bearer_token(request.headers.get("Authorization"))
+    if bearer:
+        return bearer
+    if GATEWAY_API_KEY_HEADER:
+        raw = request.headers.get(GATEWAY_API_KEY_HEADER)
+        if raw:
+            return raw.strip()
+    return None
+
+
+def _token_fingerprint(token: str | None) -> str:
+    if not token:
+        return "none"
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    return f"len={len(token)} sha256_12={digest}"
+
+
 def _start_managed_app_server(codex_bin: str, listen_url: str) -> None:
     global MANAGED_APP_SERVER_PROCESS, MANAGED_APP_SERVER_LISTEN_URL, MANAGED_APP_SERVER_STARTED_BY_GATEWAY
     if MANAGED_APP_SERVER_PROCESS and MANAGED_APP_SERVER_PROCESS.poll() is None:
@@ -129,9 +149,22 @@ async def require_bearer_api_key(request: Request, call_next):
     # Authentication is enabled when CODEX_GATEWAY_API_KEY is set and
     # GATEWAY_DISABLE_AUTH is not set to 1.
     if GATEWAY_API_KEY and not AUTH_DISABLED:
-        token = _extract_bearer_token(request.headers.get("Authorization"))
+        token = _extract_api_key_from_request(request)
         if not token or not hmac.compare_digest(token, GATEWAY_API_KEY):
-            LOGGER.warning("unauthorized request method=%s path=%s", request.method, request.url.path)
+            has_auth_header = bool(request.headers.get("Authorization"))
+            has_api_key_header = bool(
+                GATEWAY_API_KEY_HEADER and request.headers.get(GATEWAY_API_KEY_HEADER)
+            )
+            LOGGER.warning(
+                "unauthorized request method=%s path=%s has_authorization=%s has_api_key_header=%s api_key_header_name=%s incoming_token_fp=%s expected_token_fp=%s",
+                request.method,
+                request.url.path,
+                has_auth_header,
+                has_api_key_header,
+                GATEWAY_API_KEY_HEADER,
+                _token_fingerprint(token),
+                _token_fingerprint(GATEWAY_API_KEY),
+            )
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     response = await call_next(request)
     if LOG_REQUESTS or DEBUG_MODE:
@@ -158,6 +191,7 @@ class CodexRequest(BaseModel):
     cwd: str | None = None
     profile: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     sandbox: str | None = None
     approvals: str | None = None
     search: bool = False
@@ -237,6 +271,8 @@ def _build_codex_command(payload: CodexRequest, cwd: Path) -> list[str]:
         cmd.extend(["--profile", payload.profile])
     if payload.model:
         cmd.extend(["--model", payload.model])
+    if payload.reasoning_effort:
+        cmd.extend(["-c", f"model_reasoning_effort={payload.reasoning_effort}"])
     if payload.sandbox:
         cmd.extend(["--sandbox", payload.sandbox])
     if payload.approvals:
@@ -584,7 +620,7 @@ async def post_codex(payload: CodexRequest) -> dict:
 
 
 def main() -> None:
-    global REPO, CODEX_TIMEOUT_SECONDS, GATEWAY_API_KEY, AUTH_DISABLED, APP_SERVER_URL
+    global REPO, CODEX_TIMEOUT_SECONDS, GATEWAY_API_KEY, GATEWAY_API_KEY_HEADER, AUTH_DISABLED, APP_SERVER_URL
     global DEBUG_MODE, LOG_LEVEL, LOG_FILE, LOG_REQUESTS, MAX_OUTPUT_CHARS
 
     parser = argparse.ArgumentParser(description="Codex Gateway (FastAPI)")
@@ -625,6 +661,11 @@ def main() -> None:
         "--api-key",
         default=None,
         help="Bearer API key value (overrides --api-key-env if set)",
+    )
+    parser.add_argument(
+        "--api-key-header",
+        default=os.environ.get("GATEWAY_API_KEY_HEADER", GATEWAY_API_KEY_HEADER),
+        help="Alternative API key header name (default: x-api-key)",
     )
     parser.add_argument(
         "--disable-auth",
@@ -693,6 +734,7 @@ def main() -> None:
         GATEWAY_API_KEY = args.api_key.strip()
     else:
         GATEWAY_API_KEY = os.environ.get(args.api_key_env, "").strip()
+    GATEWAY_API_KEY_HEADER = str(args.api_key_header).strip().lower()
 
     if args.spawn_app_server:
         _start_managed_app_server(args.codex_bin, args.spawn_app_server_listen)

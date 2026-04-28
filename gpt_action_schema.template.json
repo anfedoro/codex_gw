@@ -59,6 +59,10 @@
           "cwd": { "type": "string" },
           "profile": { "type": "string" },
           "model": { "type": "string" },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "xhigh"]
+          },
           "sandbox": {
             "type": "string",
             "enum": ["read-only", "workspace-write", "danger-full-access"]

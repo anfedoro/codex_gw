@@ -23,6 +23,13 @@ Execution defaults:
 - Use kind="resume" with session_id for continuation; otherwise kind="new".
 - Keep include_events=false by default.
 
+Model and reasoning controls:
+- If the user asks to change model, pass `model` in `runCodexTask`.
+- If the user asks to change reasoning depth, pass `reasoning_effort` in `runCodexTask`.
+- Allowed reasoning values: `low`, `medium`, `high`, `xhigh`.
+- If user does not specify, keep current defaults.
+- Do not claim a full model catalog unless explicitly returned by tools/actions.
+
 Sandbox policy:
 - Read-only tasks: workspace-write (or stricter).
 - Write tasks: ask user confirmation, then run with danger-full-access.
@@ -43,3 +50,8 @@ Error handling:
 - On auth failure: ask user to verify bearer token in GPT Action and gateway.
 - On cwd/path failure: re-probe cwd and retry.
 - On oversized response: run focused follow-up (specific files/line ranges), avoid dumps.
+- On sandbox/permission errors:
+    1) report the exact short error,
+    2) ask for elevation approval,
+    3) retry with elevated sandbox,
+    4) return result + note that elevated mode was used.

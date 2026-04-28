@@ -22,6 +22,13 @@ This repository contains a FastAPI gateway for Codex automation.
   - Purpose: timeout for CLI command execution (`backend=exec`).
   - Default: `120`.
 
+- `model` (request payload field)
+  - Purpose: overrides model for a single `runCodexTask` call.
+
+- `reasoning_effort` (request payload field)
+  - Purpose: overrides reasoning depth for a single `runCodexTask` call.
+  - Supported values: `low`, `medium`, `high`, `xhigh`.
+
 - `GATEWAY_MAX_OUTPUT_CHARS`
   - Purpose: maximum returned size for `stdout` and `stderr` in command results.
   - Default: `60000`.
@@ -50,6 +57,11 @@ This repository contains a FastAPI gateway for Codex automation.
 - `GATEWAY_API_KEY_ENV`
   - Purpose: env var name used by CLI flag `--api-key-env`.
   - Default: `CODEX_GATEWAY_API_KEY`.
+
+- `GATEWAY_API_KEY_HEADER`
+  - Purpose: alternative header name for API key auth.
+  - Default: `x-api-key`.
+  - Note: gateway accepts both `Authorization: Bearer <token>` and this header.
 
 - `GATEWAY_DISABLE_AUTH`
   - Purpose: disable auth check even if API key is configured.
