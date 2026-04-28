@@ -1,0 +1,199 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Codex Gateway API",
+    "description": "Gateway for Codex health checks and task execution.",
+    "version": "1.1.1"
+  },
+  "servers": [
+    {
+      "url": "https://<GATEWAY_HOST>"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "ManagedAppServerStatus": {
+        "type": "object",
+        "properties": {
+          "started_by_gateway": { "type": "boolean" },
+          "running": { "type": "boolean" },
+          "pid": { "type": ["integer", "null"] },
+          "listen_url": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "repo": { "type": "string" },
+          "app_server_url": { "type": "string" },
+          "managed_app_server": {
+            "$ref": "#/components/schemas/ManagedAppServerStatus"
+          }
+        },
+        "required": ["status"],
+        "additionalProperties": true
+      },
+      "CodexRequest": {
+        "type": "object",
+        "properties": {
+          "backend": {
+            "type": "string",
+            "enum": ["exec", "app_server_ws"],
+            "default": "app_server_ws"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["new", "resume"],
+            "default": "new"
+          },
+          "session_id": { "type": "string" },
+          "prompt": { "type": "string" },
+          "cwd": { "type": "string" },
+          "profile": { "type": "string" },
+          "model": { "type": "string" },
+          "sandbox": {
+            "type": "string",
+            "enum": ["read-only", "workspace-write", "danger-full-access"]
+          },
+          "approvals": { "type": "string" },
+          "search": { "type": "boolean", "default": false },
+          "use_exec": { "type": "boolean", "default": true },
+          "app_server_url": { "type": "string" },
+          "app_server_bearer_token": { "type": "string" },
+          "include_events": { "type": "boolean", "default": false },
+          "max_events": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 500,
+            "default": 50
+          }
+        },
+        "additionalProperties": false
+      },
+      "TurnInfo": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string" },
+          "error": {
+            "type": ["object", "null"],
+            "properties": {},
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "EventItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": ["integer", "string", "null"] },
+          "method": { "type": ["string", "null"] },
+          "params": {
+            "type": ["object", "null"],
+            "properties": {},
+            "additionalProperties": true
+          },
+          "result": {
+            "type": ["object", "null"],
+            "properties": {},
+            "additionalProperties": true
+          },
+          "error": {
+            "type": ["object", "null"],
+            "properties": {},
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "CodexResponse": {
+        "type": "object",
+        "properties": {
+          "backend": { "type": "string" },
+          "app_server_url": { "type": "string" },
+          "thread_id": { "type": "string" },
+          "assistant_text": { "type": "string" },
+          "turn": { "$ref": "#/components/schemas/TurnInfo" },
+          "command": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "stdout_truncated": { "type": "boolean" },
+          "stderr_truncated": { "type": "boolean" },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/EventItem" }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getGatewayHealth",
+        "summary": "Get gateway health",
+        "responses": {
+          "200": {
+            "description": "Gateway health response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/codex": {
+      "post": {
+        "operationId": "runCodexTask",
+        "summary": "Run Codex task",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodexRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Codex execution result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodexResponse"
+                }
+              }
+            }
+          },
+          "400": { "description": "Bad request" },
+          "401": { "description": "Unauthorized" },
+          "500": { "description": "Internal error" }
+        }
+      }
+    }
+  }
+}
