@@ -2,6 +2,36 @@
 
 This repository contains a FastAPI gateway for Codex automation.
 
+## UV Project
+
+This project is managed with `uv` and uses `pyproject.toml` for dependencies and command entry points.
+
+### Install dependencies
+
+```bash
+uv sync
+```
+
+### Run locally from the project
+
+```bash
+uv run codex-gateway --repo /abs/path/to/repo --host 0.0.0.0 --port 8000
+```
+
+### Install as a tool
+
+```bash
+uv tool install .
+```
+
+After installation, the CLI entry point is:
+
+```bash
+codex-gateway
+```
+
+The project exposes the `codex-gateway` script through `[project.scripts]` in `pyproject.toml`.
+
 ## Environment Variables
 
 ### Core runtime

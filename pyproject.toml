@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-gateway"
+version = "0.1.0"
+description = "FastAPI gateway for Codex automation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "pydantic",
+  "uvicorn",
+  "websockets",
+]
+
+[project.scripts]
+codex-gateway = "codex_gateway:main"
+
+[tool.setuptools]
+py-modules = ["codex_gateway"]
