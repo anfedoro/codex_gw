@@ -63,6 +63,35 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
   - Purpose: maximum returned size for `stdout` and `stderr` in command results.
   - Default: `60000`.
 
+- `GATEWAY_JOB_POLL_AFTER_SECONDS`
+  - Purpose: recommended polling interval returned by async job endpoints.
+  - Default: `15`.
+
+- `GATEWAY_JOB_FIRST_POLL_GRACE_SECONDS`
+  - Purpose: allows one early poll shortly after job creation.
+  - Default: `3`.
+
+- `GATEWAY_JOB_TTL_SECONDS`
+  - Purpose: retention window for completed/failed async jobs in memory.
+  - Default: `7200`.
+
+- `GATEWAY_JOB_MAX_ITEMS`
+  - Purpose: max number of async jobs stored in memory before old entries are pruned.
+  - Default: `500`.
+
+- `GATEWAY_JOB_LONG_POLL_ENABLED`
+  - Purpose: enables server-side long polling for job status endpoint.
+  - Values: `1` enable, `0` disable.
+  - Default: `1`.
+
+- `GATEWAY_JOB_LONG_POLL_MAX_SECONDS`
+  - Purpose: max hold time for a single status request when polled too early.
+  - Default: `20`.
+
+- `GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS`
+  - Purpose: max wait for `POST /codex` before returning `in_progress` with `job_id`.
+  - Default: `20`.
+
 ### App Server backend
 
 - `APP_SERVER_URL`
@@ -139,6 +168,24 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
 - `gpt_action_schema.template.json`: OpenAPI schema template for Custom GPT Actions.
 - `gpt_system_instruction.template.txt`: system instruction template for the Custom GPT.
 
+### Import from URL
+
+Gateway exposes a ready-to-import schema endpoint:
+
+- `GET /gpt-action-schema.json`
+
+Behavior:
+- Returns JSON schema based on `gpt_action_schema.template.json`.
+- Replaces `https://<GATEWAY_HOST>` with the current request host/protocol (supports reverse proxy headers).
+- Intended for ChatGPT "Import from URL" flow.
+- Endpoint is protected by gateway auth by default.
+- Set `GATEWAY_PUBLIC_SCHEMA=1` only if you explicitly want unauthenticated schema access.
+- Optional import-only query key:
+  - `GATEWAY_SCHEMA_IMPORT_KEY=<value>`
+  - `GATEWAY_SCHEMA_IMPORT_KEY_PARAM=<param_name>` (default: `schema_key`)
+  - Example:
+    - `https://cdx.avfserv.net/gpt-action-schema.json?schema_key=<value>`
+
 ## Project/Thread Discovery
 
 The gateway supports project and thread discovery based on local Codex state:
@@ -160,3 +207,41 @@ Recommended GPT flow:
 3. Call `getThreads` filtered by selected `cwd`.
 4. Ask user which thread to resume.
 5. Call `runCodexTask` with `kind="resume"` and selected `session_id`.
+
+## Long-Running Tasks (Async Jobs)
+
+To avoid HTTP/proxy timeouts for long Codex operations, use async job endpoints:
+
+1. `POST /codex/jobs` with body:
+   - `{ "payload": { ...CodexRequest... } }`
+2. Receive `job_id` and immediate status (`queued` or `running`).
+3. Poll `GET /codex/jobs/{job_id}` every `poll_after_seconds` (default 15s).
+   - Prefer `retry_after_seconds` from response when present.
+   - Endpoint always returns `200` for existing jobs and includes retry hints.
+   - If polled too early, gateway can hold the request (long-poll) and respond later to reduce request spam.
+   - Long-poll is event-driven only for significant updates (completed assistant message, turn completion, failures).
+   - High-frequency WS noise (deltas/started/token-usage updates) does not wake polling early.
+4. When status is `completed`, call `GET /codex/jobs/{job_id}/result`.
+
+Notes:
+- `GET /codex/jobs/{job_id}/result` returns:
+  - `200` for completed jobs,
+  - `409` if the job is not finished yet,
+  - `502` if the job failed.
+- Polling endpoints are read-only and should not require repeated user confirmations in GPT flow after job creation.
+- `GET /codex/jobs/{job_id}` returns:
+  - `200` with status and `retry_after_seconds` / `next_poll_after_at` hints.
+  - Includes `last_event_method` to indicate the latest internal update marker.
+
+### Sync endpoint fallback behavior
+
+`POST /codex` remains available for compatibility.
+
+For `backend=app_server_ws`, gateway now:
+- starts internal async job,
+- waits up to `GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS`,
+- if finished quickly: returns normal final Codex result,
+- otherwise returns:
+  - `status: "in_progress"`
+  - `job_id`
+  - current `job` status including `last_update_text` when available.

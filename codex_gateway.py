@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import itertools
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -46,6 +47,17 @@ MAX_OUTPUT_CHARS = int(os.environ.get("GATEWAY_MAX_OUTPUT_CHARS", "60000"))
 MANAGED_APP_SERVER_PROCESS: subprocess.Popen[str] | None = None
 MANAGED_APP_SERVER_LISTEN_URL: str | None = None
 MANAGED_APP_SERVER_STARTED_BY_GATEWAY = False
+JOB_POLL_AFTER_SECONDS = int(os.environ.get("GATEWAY_JOB_POLL_AFTER_SECONDS", "15"))
+JOB_TTL_SECONDS = int(os.environ.get("GATEWAY_JOB_TTL_SECONDS", "7200"))
+JOB_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_MAX_ITEMS", "500"))
+JOB_LONG_POLL_ENABLED = os.environ.get("GATEWAY_JOB_LONG_POLL_ENABLED", "1") == "1"
+JOB_LONG_POLL_MAX_SECONDS = int(os.environ.get("GATEWAY_JOB_LONG_POLL_MAX_SECONDS", "20"))
+CODEX_SYNC_MAX_WAIT_SECONDS = int(os.environ.get("GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS", "20"))
+JOBS: dict[str, dict] = {}
+JOB_COUNTER = itertools.count(1)
+PUBLIC_SCHEMA_ENABLED = os.environ.get("GATEWAY_PUBLIC_SCHEMA", "0") == "1"
+SCHEMA_IMPORT_KEY = os.environ.get("GATEWAY_SCHEMA_IMPORT_KEY", "").strip()
+SCHEMA_IMPORT_KEY_PARAM = os.environ.get("GATEWAY_SCHEMA_IMPORT_KEY_PARAM", "schema_key").strip()
 
 
 def _configure_logging() -> None:
@@ -148,6 +160,12 @@ def _stop_managed_app_server() -> None:
 @app.middleware("http")
 async def require_bearer_api_key(request: Request, call_next):
     started = time.monotonic()
+    if request.url.path == "/gpt-action-schema.json" and PUBLIC_SCHEMA_ENABLED:
+        return await call_next(request)
+    if request.url.path == "/gpt-action-schema.json" and SCHEMA_IMPORT_KEY and SCHEMA_IMPORT_KEY_PARAM:
+        provided = request.query_params.get(SCHEMA_IMPORT_KEY_PARAM, "")
+        if provided and hmac.compare_digest(provided, SCHEMA_IMPORT_KEY):
+            return await call_next(request)
     # Authentication is enabled when CODEX_GATEWAY_API_KEY is set and
     # GATEWAY_DISABLE_AUTH is not set to 1.
     if GATEWAY_API_KEY and not AUTH_DISABLED:
@@ -215,6 +233,75 @@ class CodexRequest(BaseModel):
     )
 
 
+class CodexJobRequest(BaseModel):
+    payload: CodexRequest
+
+
+def _job_now() -> int:
+    return int(time.time())
+
+
+def _format_job_view(job: dict, include_result: bool = False) -> dict:
+    now = _job_now()
+    next_poll_after = int(job.get("next_poll_after", 0) or 0)
+    retry_after_seconds = max(0, next_poll_after - now)
+    out = {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "created_at": _to_iso(job.get("created_at")),
+        "started_at": _to_iso(job.get("started_at")),
+        "updated_at": _to_iso(job.get("updated_at")),
+        "completed_at": _to_iso(job.get("completed_at")),
+        "poll_after_seconds": JOB_POLL_AFTER_SECONDS,
+        "next_poll_after_at": _to_iso(next_poll_after) if next_poll_after > 0 else None,
+        "retry_after_seconds": retry_after_seconds,
+        "thread_id": job.get("thread_id"),
+        "last_event_method": job.get("last_event_method"),
+        "last_update_text": job.get("last_update_text"),
+        "error": job.get("error"),
+    }
+    if include_result:
+        out["result"] = job.get("result")
+    return out
+
+
+def _prune_jobs() -> None:
+    now = _job_now()
+    drop_ids = []
+    for job_id, job in JOBS.items():
+        done = job["status"] in {"completed", "failed"}
+        is_expired = done and (now - int(job.get("updated_at", now)) > JOB_TTL_SECONDS)
+        if is_expired:
+            drop_ids.append(job_id)
+    for job_id in drop_ids:
+        JOBS.pop(job_id, None)
+    if len(JOBS) <= JOB_MAX_ITEMS:
+        return
+    # Keep newest entries first, drop oldest overflow.
+    overflow = len(JOBS) - JOB_MAX_ITEMS
+    oldest = sorted(JOBS.values(), key=lambda j: int(j.get("updated_at", 0)))[:overflow]
+    for job in oldest:
+        JOBS.pop(job["job_id"], None)
+
+
+def _is_significant_ws_event(method: str | None, msg: dict) -> bool:
+    if not method:
+        return False
+    # Terminal/critical markers should wake long-poll immediately.
+    if method in {
+        "turn/completed",
+        "item/completed",
+        "error",
+    }:
+        if method == "item/completed":
+            item = msg.get("params", {}).get("item", {})
+            # Wake early only for completed assistant message.
+            return item.get("type") == "agent_message"
+        return True
+    # Everything else (deltas, started notifications, token usage updates) is non-critical.
+    return False
+
+
 def _resolve_repo_path(path: str) -> Path:
     target = (REPO / path).resolve()
     try:
@@ -222,6 +309,27 @@ def _resolve_repo_path(path: str) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Illegal path") from exc
     return target
+
+
+def _gateway_base_url(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+def _render_gpt_action_schema(base_url: str) -> dict:
+    template_path = Path(__file__).resolve().parent / "gpt_action_schema.template.json"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Schema template not found")
+    try:
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid schema template: {exc}") from exc
+
+    for server in template.get("servers", []):
+        if server.get("url") == "https://<GATEWAY_HOST>":
+            server["url"] = base_url
+    return template
 
 
 def _codex_home() -> Path:
@@ -353,7 +461,11 @@ def _build_codex_command(payload: CodexRequest, cwd: Path) -> list[str]:
     return cmd
 
 
-async def _run_codex_via_app_server_ws(payload: CodexRequest, cwd: Path | None) -> dict:
+async def _run_codex_via_app_server_ws(
+    payload: CodexRequest,
+    cwd: Path | None,
+    on_update: Callable[[dict], None] | None = None,
+) -> dict:
     try:
         from websockets.asyncio.client import connect as ws_connect
     except Exception:
@@ -425,6 +537,11 @@ async def _run_codex_via_app_server_ws(payload: CodexRequest, cwd: Path | None) 
                 assistant_completed_text = item["text"]
         elif method == "turn/completed":
             turn_completed = True
+        if on_update:
+            try:
+                on_update(msg)
+            except Exception:
+                LOGGER.debug("on_update callback failed", exc_info=True)
 
         # Handle server-initiated request (for approvals/user input).
         if "id" in msg and "method" in msg and "result" not in msg and "error" not in msg:
@@ -492,6 +609,8 @@ async def _run_codex_via_app_server_ws(payload: CodexRequest, cwd: Path | None) 
                 params["cwd"] = str(cwd)
             if payload.model:
                 params["model"] = payload.model
+            if payload.reasoning_effort:
+                params["modelReasoningEffort"] = payload.reasoning_effort
             if payload.sandbox:
                 params["sandbox"] = payload.sandbox
             if payload.approvals:
@@ -577,6 +696,11 @@ async def healthz() -> dict:
             "listen_url": MANAGED_APP_SERVER_LISTEN_URL,
         },
     }
+
+
+@app.get("/gpt-action-schema.json")
+async def gpt_action_schema(request: Request) -> dict:
+    return _render_gpt_action_schema(_gateway_base_url(request))
 
 
 @app.get("/projects")
@@ -783,6 +907,42 @@ async def post_codex(payload: CodexRequest) -> dict:
         payload.include_events,
         payload.max_events,
     )
+    # Keep sync API for compatibility, but avoid proxy timeouts:
+    # run as background job and wait a short window for completion.
+    if payload.backend == "app_server_ws":
+        job = _create_job(payload)
+        job_id = job["job_id"]
+        try:
+            await asyncio.wait_for(job["done_event"].wait(), timeout=CODEX_SYNC_MAX_WAIT_SECONDS)
+        except TimeoutError:
+            return {
+                "status": "in_progress",
+                "message": "Codex is still working. Continue polling job status.",
+                "job_id": job_id,
+                "job": _format_job_view(job, include_result=False),
+            }
+        # Completed within wait window: return final result/error in sync response.
+        if job["status"] == "completed":
+            return job["result"]
+        if job["status"] == "failed":
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Codex job failed",
+                    "job_id": job_id,
+                    "job": _format_job_view(job, include_result=False),
+                },
+            )
+    return await _execute_codex(payload)
+
+
+async def _execute_codex(payload: CodexRequest) -> dict:
+    return await _execute_codex_with_updates(payload, on_update=None)
+
+
+async def _execute_codex_with_updates(
+    payload: CodexRequest, on_update: Callable[[dict], None] | None
+) -> dict:
     if payload.backend == "app_server_ws":
         # For remote app-server usage (including SSH tunnels), caller may not
         # know remote absolute paths in advance. In that case we start without
@@ -791,7 +951,7 @@ async def post_codex(payload: CodexRequest) -> dict:
         # Run the WS client in a dedicated thread to avoid event-loop interaction
         # issues under ASGI runtimes.
         return await asyncio.to_thread(
-            lambda: asyncio.run(_run_codex_via_app_server_ws(payload, ws_cwd))
+            lambda: asyncio.run(_run_codex_via_app_server_ws(payload, ws_cwd, on_update=on_update))
         )
     cwd = Path(payload.cwd).resolve() if payload.cwd else REPO
     if not cwd.exists() or not cwd.is_dir():
@@ -800,9 +960,167 @@ async def post_codex(payload: CodexRequest) -> dict:
     return _run_command(cmd, cwd=cwd, timeout=CODEX_TIMEOUT_SECONDS)
 
 
+async def _run_job(job_id: str) -> None:
+    job = JOBS[job_id]
+    loop = asyncio.get_running_loop()
+    notify_event: asyncio.Event = job["notify_event"]
+
+    def _notify_job_update(method: str | None = None, wake_poll: bool = False) -> None:
+        now = _job_now()
+        job["updated_at"] = now
+        if method:
+            job["last_event_method"] = method
+        if not wake_poll:
+            return
+        if notify_event.is_set():
+            return
+        loop.call_soon_threadsafe(notify_event.set)
+
+    def _on_update(msg: dict) -> None:
+        method = msg.get("method")
+        if method == "item/agentMessage/delta":
+            delta = msg.get("params", {}).get("delta")
+            if isinstance(delta, str):
+                prev = job.get("last_update_text") or ""
+                # Keep only a short rolling preview.
+                merged = (prev + delta)[-1000:]
+                job["last_update_text"] = merged
+        elif method == "item/completed":
+            item = msg.get("params", {}).get("item", {})
+            if item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    job["last_update_text"] = text[-1000:]
+        m = method if isinstance(method, str) else None
+        _notify_job_update(m, wake_poll=_is_significant_ws_event(m, msg))
+
+    job["status"] = "running"
+    job["started_at"] = _job_now()
+    job["updated_at"] = job["started_at"]
+    _notify_job_update("job/running", wake_poll=True)
+    try:
+        result = await _execute_codex_with_updates(job["payload"], on_update=_on_update)
+        job["result"] = result
+        if isinstance(result, dict):
+            job["thread_id"] = result.get("thread_id")
+        job["status"] = "completed"
+    except HTTPException as exc:
+        job["status"] = "failed"
+        job["error"] = {"status_code": exc.status_code, "detail": exc.detail}
+    except Exception as exc:  # pragma: no cover
+        LOGGER.exception("job execution failed job_id=%s", job_id)
+        job["status"] = "failed"
+        job["error"] = {"status_code": 500, "detail": str(exc)}
+    finally:
+        ts = _job_now()
+        job["updated_at"] = ts
+        job["completed_at"] = ts
+        job["next_poll_after"] = ts
+        job["last_event_method"] = "job/completed" if job["status"] == "completed" else "job/failed"
+        _notify_job_update(job["last_event_method"], wake_poll=True)
+        done_event: asyncio.Event = job["done_event"]
+        if not done_event.is_set():
+            done_event.set()
+        _prune_jobs()
+
+
+def _create_job(payload: CodexRequest) -> dict:
+    _prune_jobs()
+    job_id = f"job_{_job_now()}_{next(JOB_COUNTER)}"
+    ts = _job_now()
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": ts,
+        "started_at": None,
+        "updated_at": ts,
+        "completed_at": None,
+        "thread_id": None,
+        "next_poll_after": ts,
+        "last_event_method": "job/queued",
+        "last_update_text": None,
+        "notify_event": asyncio.Event(),
+        "done_event": asyncio.Event(),
+        "error": None,
+        "result": None,
+        "payload": payload,
+    }
+    JOBS[job_id] = job
+    asyncio.create_task(_run_job(job_id))
+    return job
+
+
+@app.post("/codex/jobs")
+async def create_codex_job(request: CodexJobRequest) -> dict:
+    job = _create_job(request.payload)
+    return _format_job_view(job, include_result=False)
+
+
+@app.get("/codex/jobs/{job_id}")
+async def get_codex_job(job_id: str) -> dict:
+    _prune_jobs()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    now = _job_now()
+    if job["status"] in {"queued", "running"}:
+        next_poll_after = int(job.get("next_poll_after", 0) or 0)
+        if JOB_LONG_POLL_ENABLED and next_poll_after > now:
+            wait_seconds = min(next_poll_after - now, JOB_LONG_POLL_MAX_SECONDS)
+            if wait_seconds > 0:
+                notify_event: asyncio.Event | None = job.get("notify_event")
+                if notify_event:
+                    try:
+                        await asyncio.wait_for(notify_event.wait(), timeout=wait_seconds)
+                    except TimeoutError:
+                        pass
+                    finally:
+                        notify_event.clear()
+                else:
+                    await asyncio.sleep(wait_seconds)
+                _prune_jobs()
+                refreshed = JOBS.get(job_id)
+                if not refreshed:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                job = refreshed
+                now = _job_now()
+                next_poll_after = int(job.get("next_poll_after", 0) or 0)
+        if next_poll_after <= now:
+            job["next_poll_after"] = now + JOB_POLL_AFTER_SECONDS
+            job["updated_at"] = now
+    return _format_job_view(job, include_result=False)
+
+
+@app.get("/codex/jobs/{job_id}/result")
+async def get_codex_job_result(job_id: str) -> dict:
+    _prune_jobs()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Job is not finished yet",
+                "job": _format_job_view(job, include_result=False),
+            },
+        )
+    if job["status"] == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Job failed",
+                "job": _format_job_view(job, include_result=False),
+            },
+        )
+    return _format_job_view(job, include_result=True)
+
+
 def main() -> None:
     global REPO, CODEX_TIMEOUT_SECONDS, GATEWAY_API_KEY, GATEWAY_API_KEY_HEADER, AUTH_DISABLED, APP_SERVER_URL
     global DEBUG_MODE, LOG_LEVEL, LOG_FILE, LOG_REQUESTS, MAX_OUTPUT_CHARS
+    global JOB_POLL_AFTER_SECONDS, JOB_TTL_SECONDS, JOB_MAX_ITEMS, JOB_LONG_POLL_ENABLED, JOB_LONG_POLL_MAX_SECONDS
+    global CODEX_SYNC_MAX_WAIT_SECONDS
 
     parser = argparse.ArgumentParser(description="Codex Gateway (FastAPI)")
     parser.add_argument(
@@ -832,6 +1150,42 @@ def main() -> None:
         type=int,
         default=MAX_OUTPUT_CHARS,
         help="Maximum stdout/stderr characters returned per command result",
+    )
+    parser.add_argument(
+        "--job-poll-after-seconds",
+        type=int,
+        default=JOB_POLL_AFTER_SECONDS,
+        help="Recommended polling interval for async job status",
+    )
+    parser.add_argument(
+        "--job-ttl-seconds",
+        type=int,
+        default=JOB_TTL_SECONDS,
+        help="Retention time for completed/failed async jobs in memory",
+    )
+    parser.add_argument(
+        "--job-max-items",
+        type=int,
+        default=JOB_MAX_ITEMS,
+        help="Maximum number of async jobs kept in memory",
+    )
+    parser.add_argument(
+        "--job-long-poll-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=JOB_LONG_POLL_ENABLED,
+        help="Enable server-side long-poll behavior for async job status endpoint",
+    )
+    parser.add_argument(
+        "--job-long-poll-max-seconds",
+        type=int,
+        default=JOB_LONG_POLL_MAX_SECONDS,
+        help="Maximum hold time for one long-poll status request",
+    )
+    parser.add_argument(
+        "--codex-sync-max-wait-seconds",
+        type=int,
+        default=CODEX_SYNC_MAX_WAIT_SECONDS,
+        help="Max time for /codex sync request before returning in_progress with job_id",
     )
     parser.add_argument(
         "--api-key-env",
@@ -896,6 +1250,12 @@ def main() -> None:
     REPO = Path(args.repo).resolve()
     CODEX_TIMEOUT_SECONDS = args.timeout_seconds
     MAX_OUTPUT_CHARS = args.max_output_chars
+    JOB_POLL_AFTER_SECONDS = args.job_poll_after_seconds
+    JOB_TTL_SECONDS = args.job_ttl_seconds
+    JOB_MAX_ITEMS = args.job_max_items
+    JOB_LONG_POLL_ENABLED = args.job_long_poll_enabled
+    JOB_LONG_POLL_MAX_SECONDS = args.job_long_poll_max_seconds
+    CODEX_SYNC_MAX_WAIT_SECONDS = args.codex_sync_max_wait_seconds
     APP_SERVER_URL = args.spawn_app_server_listen if args.spawn_app_server else APP_SERVER_URL
     AUTH_DISABLED = args.disable_auth or (os.environ.get("GATEWAY_DISABLE_AUTH", "0") == "1")
     DEBUG_MODE = args.debug
