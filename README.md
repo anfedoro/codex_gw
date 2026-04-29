@@ -92,6 +92,15 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
   - Purpose: max wait for `POST /codex` before returning `in_progress` with `job_id`.
   - Default: `20`.
 
+- `GATEWAY_JOB_DEBUG_TRACE_ENABLED`
+  - Purpose: capture compact WS event trace per job for diff parser diagnostics.
+  - Values: `1` enable, `0` disable.
+  - Default: `1`.
+
+- `GATEWAY_JOB_DEBUG_TRACE_MAX_ITEMS`
+  - Purpose: max number of debug trace rows stored per job.
+  - Default: `400`.
+
 ### App Server backend
 
 - `APP_SERVER_URL`
@@ -213,7 +222,7 @@ Recommended GPT flow:
 To avoid HTTP/proxy timeouts for long Codex operations, use async job endpoints:
 
 1. `POST /codex/jobs` with body:
-   - `{ "payload": { ...CodexRequest... } }`
+   - `{ "payload": { ...CodexRequest..., "diff_mode": "live|final_only|off" } }`
 2. Receive `job_id` and immediate status (`queued` or `running`).
 3. Poll `GET /codex/jobs/{job_id}` every `poll_after_seconds` (default 15s).
    - Prefer `retry_after_seconds` from response when present.
@@ -221,7 +230,11 @@ To avoid HTTP/proxy timeouts for long Codex operations, use async job endpoints:
    - If polled too early, gateway can hold the request (long-poll) and respond later to reduce request spam.
    - Long-poll is event-driven only for significant updates (completed assistant message, turn completion, failures).
    - High-frequency WS noise (deltas/started/token-usage updates) does not wake polling early.
-4. When status is `completed`, call `GET /codex/jobs/{job_id}/result`.
+4. For diff orchestration:
+   - If `diff_mode=live`: call `GET /codex/jobs/{job_id}/diff/live?since_version=<n>` when `diff_live_version` increases.
+   - If `diff_mode=final_only`: wait for `diff_final_available=true`, then call `GET /codex/jobs/{job_id}/diff/final`.
+   - If `diff_mode=off`: skip diff endpoints unless diagnostics are needed.
+5. When status is `completed`, call `GET /codex/jobs/{job_id}/result`.
 
 Notes:
 - `GET /codex/jobs/{job_id}/result` returns:
@@ -231,7 +244,19 @@ Notes:
 - Polling endpoints are read-only and should not require repeated user confirmations in GPT flow after job creation.
 - `GET /codex/jobs/{job_id}` returns:
   - `200` with status and `retry_after_seconds` / `next_poll_after_at` hints.
-  - Includes `last_event_method` to indicate the latest internal update marker.
+  - Includes diff signals:
+    - `diff_live_available`
+    - `diff_live_version`
+    - `diff_final_available`
+    - `diff_hint`
+    - `diagnostic_diff_available`
+- `GET /codex/jobs/{job_id}/diff/live`:
+  - Returns only incremental diff updates after `since_version`.
+- `GET /codex/jobs/{job_id}/diff/final`:
+  - Returns final diff (`409` until ready).
+  - On failed jobs may return diagnostic diff when available.
+- `GET /codex/jobs/{job_id}/debug-trace`:
+  - Returns compact WS-event trace (method + key-shape hints) to diagnose why diff extraction did or did not trigger.
 
 ### Sync endpoint fallback behavior
 

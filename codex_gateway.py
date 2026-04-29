@@ -53,6 +53,8 @@ JOB_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_MAX_ITEMS", "500"))
 JOB_LONG_POLL_ENABLED = os.environ.get("GATEWAY_JOB_LONG_POLL_ENABLED", "1") == "1"
 JOB_LONG_POLL_MAX_SECONDS = int(os.environ.get("GATEWAY_JOB_LONG_POLL_MAX_SECONDS", "20"))
 CODEX_SYNC_MAX_WAIT_SECONDS = int(os.environ.get("GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS", "20"))
+JOB_DEBUG_TRACE_ENABLED = os.environ.get("GATEWAY_JOB_DEBUG_TRACE_ENABLED", "1") == "1"
+JOB_DEBUG_TRACE_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_DEBUG_TRACE_MAX_ITEMS", "400"))
 JOBS: dict[str, dict] = {}
 JOB_COUNTER = itertools.count(1)
 PUBLIC_SCHEMA_ENABLED = os.environ.get("GATEWAY_PUBLIC_SCHEMA", "0") == "1"
@@ -231,6 +233,10 @@ class CodexRequest(BaseModel):
         le=500,
         description="Maximum number of app-server events to keep when include_events=true.",
     )
+    diff_mode: Literal["live", "final_only", "off"] = Field(
+        default="live",
+        description="Diff orchestration mode for async jobs.",
+    )
 
 
 class CodexJobRequest(BaseModel):
@@ -258,6 +264,12 @@ def _format_job_view(job: dict, include_result: bool = False) -> dict:
         "thread_id": job.get("thread_id"),
         "last_event_method": job.get("last_event_method"),
         "last_update_text": job.get("last_update_text"),
+        "diff_mode": job.get("diff_mode"),
+        "diff_live_available": bool(job.get("diff_live_available", False)),
+        "diff_live_version": int(job.get("diff_live_version", 0) or 0),
+        "diff_final_available": bool(job.get("diff_final_available", False)),
+        "diff_hint": job.get("diff_hint"),
+        "diagnostic_diff_available": bool(job.get("diagnostic_diff_available", False)),
         "error": job.get("error"),
     }
     if include_result:
@@ -300,6 +312,162 @@ def _is_significant_ws_event(method: str | None, msg: dict) -> bool:
         return True
     # Everything else (deltas, started notifications, token usage updates) is non-critical.
     return False
+
+
+def _collect_strings(obj) -> list[str]:
+    out: list[str] = []
+    if isinstance(obj, str):
+        out.append(obj)
+        return out
+    if isinstance(obj, dict):
+        for v in obj.values():
+            out.extend(_collect_strings(v))
+        return out
+    if isinstance(obj, list):
+        for v in obj:
+            out.extend(_collect_strings(v))
+    return out
+
+
+def _collect_values_by_key(obj, target_key: str) -> list:
+    out: list = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == target_key:
+                out.append(v)
+            out.extend(_collect_values_by_key(v, target_key))
+    elif isinstance(obj, list):
+        for v in obj:
+            out.extend(_collect_values_by_key(v, target_key))
+    return out
+
+
+def _looks_like_diff(text: str) -> bool:
+    if not text or len(text) < 8:
+        return False
+    return (
+        "diff --git " in text
+        or "@@ " in text
+        or text.startswith("--- ")
+        or text.startswith("+++ ")
+    )
+
+
+def _extract_best_diff_text(msg: dict) -> str | None:
+    params = msg.get("params")
+    strings = _collect_strings(params)
+    # Prefer explicit diff-like keys first when present.
+    for key in ("diff", "unified_diff", "patch"):
+        vals = _collect_values_by_key(params, key)
+        for v in vals:
+            if isinstance(v, str) and _looks_like_diff(v):
+                strings.append(v)
+    diff_candidates = [s for s in strings if _looks_like_diff(s)]
+    if not diff_candidates:
+        return None
+    # Prefer the largest candidate as it is usually the full patch.
+    diff_candidates.sort(key=len, reverse=True)
+    return diff_candidates[0]
+
+
+def _register_diff_update(job: dict, method: str | None, diff_text: str) -> None:
+    capped_diff = diff_text[:400000]
+    mode = job.get("diff_mode", "live")
+    now_iso = _to_iso(_job_now())
+    job["latest_diff_text"] = capped_diff
+
+    if mode == "live":
+        version = int(job.get("diff_live_version", 0)) + 1
+        job["diff_live_version"] = version
+        job["diff_live_available"] = True
+        updates = job["diff_live_updates"]
+        updates.append(
+            {
+                "version": version,
+                "method": method,
+                "updated_at": now_iso,
+                "size": len(capped_diff),
+                "diff": capped_diff,
+            }
+        )
+        if len(updates) > 200:
+            del updates[: len(updates) - 200]
+        job["diff_hint"] = "live update available"
+    elif mode == "final_only":
+        # Capture latest patch, but do not publish incremental updates.
+        job["diff_hint"] = "diff captured (final only)"
+    else:
+        # off mode: keep internal trace for potential diagnostics.
+        job["diff_hint"] = "diff capture disabled"
+
+
+def _append_job_debug_trace(job: dict, msg: dict) -> None:
+    if not JOB_DEBUG_TRACE_ENABLED:
+        return
+    trace = job.get("debug_trace")
+    if trace is None:
+        return
+    method = msg.get("method")
+    params = msg.get("params")
+    row = {
+        "ts": _to_iso(_job_now()),
+        "method": method if isinstance(method, str) else None,
+        "param_keys": sorted(list(params.keys())) if isinstance(params, dict) else [],
+        "diff_like_keys_present": {
+            "diff": bool(_collect_values_by_key(params, "diff")) if params is not None else False,
+            "unified_diff": bool(_collect_values_by_key(params, "unified_diff")) if params is not None else False,
+            "patch": bool(_collect_values_by_key(params, "patch")) if params is not None else False,
+            "changes": bool(_collect_values_by_key(params, "changes")) if params is not None else False,
+        },
+    }
+    trace.append(row)
+    if len(trace) > JOB_DEBUG_TRACE_MAX_ITEMS:
+        del trace[: len(trace) - JOB_DEBUG_TRACE_MAX_ITEMS]
+
+
+def _parse_unified_diff(raw: str) -> list[dict]:
+    files: list[dict] = []
+    current_file: dict | None = None
+    current_hunk: dict | None = None
+
+    for line in raw.splitlines():
+        if line.startswith("diff --git "):
+            current_file = {
+                "old_path": None,
+                "new_path": None,
+                "hunks": [],
+            }
+            files.append(current_file)
+            current_hunk = None
+            continue
+        if current_file is None:
+            continue
+        if line.startswith("--- "):
+            current_file["old_path"] = line[4:].strip()
+            continue
+        if line.startswith("+++ "):
+            current_file["new_path"] = line[4:].strip()
+            continue
+        if line.startswith("@@ "):
+            current_hunk = {
+                "header": line,
+                "old_lines": [],
+                "new_lines": [],
+                "context_lines": [],
+            }
+            current_file["hunks"].append(current_hunk)
+            continue
+        if current_hunk is None:
+            continue
+        if line.startswith("+") and not line.startswith("+++ "):
+            current_hunk["new_lines"].append(line[1:])
+        elif line.startswith("-") and not line.startswith("--- "):
+            current_hunk["old_lines"].append(line[1:])
+        else:
+            txt = line[1:] if line.startswith(" ") else line
+            current_hunk["context_lines"].append(txt)
+
+    return files
 
 
 def _resolve_repo_path(path: str) -> Path:
@@ -977,7 +1145,11 @@ async def _run_job(job_id: str) -> None:
         loop.call_soon_threadsafe(notify_event.set)
 
     def _on_update(msg: dict) -> None:
+        _append_job_debug_trace(job, msg)
         method = msg.get("method")
+        diff_text = _extract_best_diff_text(msg)
+        if diff_text:
+            _register_diff_update(job, method if isinstance(method, str) else None, diff_text)
         if method == "item/agentMessage/delta":
             delta = msg.get("params", {}).get("delta")
             if isinstance(delta, str):
@@ -1004,6 +1176,10 @@ async def _run_job(job_id: str) -> None:
         if isinstance(result, dict):
             job["thread_id"] = result.get("thread_id")
         job["status"] = "completed"
+        if job.get("diff_mode") in {"live", "final_only"} and job.get("latest_diff_text"):
+            job["diff_final_available"] = True
+            job["final_diff_text"] = job.get("latest_diff_text")
+            job["diff_hint"] = "final diff ready"
     except HTTPException as exc:
         job["status"] = "failed"
         job["error"] = {"status_code": exc.status_code, "detail": exc.detail}
@@ -1013,6 +1189,9 @@ async def _run_job(job_id: str) -> None:
         job["error"] = {"status_code": 500, "detail": str(exc)}
     finally:
         ts = _job_now()
+        if job["status"] == "failed" and job.get("latest_diff_text"):
+            job["diagnostic_diff_available"] = True
+            job["diff_hint"] = "diagnostic diff available"
         job["updated_at"] = ts
         job["completed_at"] = ts
         job["next_poll_after"] = ts
@@ -1039,10 +1218,20 @@ def _create_job(payload: CodexRequest) -> dict:
         "next_poll_after": ts,
         "last_event_method": "job/queued",
         "last_update_text": None,
+        "diff_mode": payload.diff_mode,
+        "diff_live_available": False,
+        "diff_live_version": 0,
+        "diff_final_available": False,
+        "diff_hint": None,
+        "diagnostic_diff_available": False,
+        "latest_diff_text": None,
+        "final_diff_text": None,
+        "diff_live_updates": [],
         "notify_event": asyncio.Event(),
         "done_event": asyncio.Event(),
         "error": None,
         "result": None,
+        "debug_trace": [],
         "payload": payload,
     }
     JOBS[job_id] = job
@@ -1114,6 +1303,127 @@ async def get_codex_job_result(job_id: str) -> dict:
             },
         )
     return _format_job_view(job, include_result=True)
+
+
+@app.get("/codex/jobs/{job_id}/diff/live")
+async def get_codex_job_diff_live(
+    job_id: str,
+    since_version: int = Query(default=0, ge=0),
+    max_chars: int = Query(default=200000, ge=1000, le=2000000),
+) -> dict:
+    _prune_jobs()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("diff_mode") != "live":
+        return {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "diff_mode": job.get("diff_mode"),
+            "diff_live_available": False,
+            "diff_live_version": int(job.get("diff_live_version", 0)),
+            "updates": [],
+        }
+
+    current_version = int(job.get("diff_live_version", 0))
+    updates = []
+    for upd in job.get("diff_live_updates", []):
+        version = int(upd.get("version", 0))
+        if version <= since_version:
+            continue
+        row = dict(upd)
+        if isinstance(row.get("diff"), str):
+            row["diff"] = row["diff"][:max_chars]
+        updates.append(row)
+
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "diff_mode": job.get("diff_mode"),
+        "diff_live_available": bool(job.get("diff_live_available", False)),
+        "diff_live_version": current_version,
+        "updates": updates,
+    }
+
+
+@app.get("/codex/jobs/{job_id}/diff/final")
+async def get_codex_job_diff_final(
+    job_id: str,
+    view: str = Query(default="raw", pattern="^(raw|split)$"),
+    max_chars: int = Query(default=200000, ge=1000, le=2000000),
+) -> dict:
+    _prune_jobs()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    final_ready = bool(job.get("diff_final_available", False))
+    diagnostic_ready = bool(job.get("diagnostic_diff_available", False))
+    if not final_ready and not diagnostic_ready:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Final diff is not ready",
+                "job": _format_job_view(job, include_result=False),
+            },
+        )
+
+    raw = (job.get("final_diff_text") or job.get("latest_diff_text") or "")[:max_chars]
+    if not raw:
+        return {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "has_diff": False,
+            "mode": "diagnostic" if diagnostic_ready and not final_ready else "final",
+        }
+
+    if view == "split":
+        return {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "has_diff": True,
+            "view": "split",
+            "mode": "diagnostic" if diagnostic_ready and not final_ready else "final",
+            "files": _parse_unified_diff(raw),
+        }
+
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "has_diff": True,
+        "view": "raw",
+        "mode": "diagnostic" if diagnostic_ready and not final_ready else "final",
+        "diff": raw,
+    }
+
+
+@app.get("/codex/jobs/{job_id}/diff")
+async def get_codex_job_diff_compat(
+    job_id: str,
+    view: str = Query(default="raw", pattern="^(raw|split)$"),
+    max_chars: int = Query(default=200000, ge=1000, le=2000000),
+) -> dict:
+    # Backward-compatible alias: returns final diff when available.
+    return await get_codex_job_diff_final(job_id=job_id, view=view, max_chars=max_chars)
+
+
+@app.get("/codex/jobs/{job_id}/debug-trace")
+async def get_codex_job_debug_trace(
+    job_id: str,
+    limit: int = Query(default=200, ge=1, le=2000),
+) -> dict:
+    _prune_jobs()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    trace = job.get("debug_trace", [])
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "trace_count": len(trace),
+        "trace": trace[-limit:],
+    }
 
 
 def main() -> None:

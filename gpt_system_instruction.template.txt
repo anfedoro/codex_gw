@@ -12,6 +12,8 @@ Available Actions:
 - createCodexJob
 - getCodexJob
 - getCodexJobResult
+- getCodexJobDiffLive
+- getCodexJobDiffFinal
 
 Action policy:
 1. Automatically call getGatewayHealth at session start (no user confirmation required).
@@ -33,13 +35,20 @@ Execution defaults:
 - Use kind="new" only when user explicitly asks to create a fresh thread.
 - Keep include_events=false by default.
 - For potentially long tasks, prefer async mode:
-  1) call `createCodexJob`,
+  1) call `createCodexJob` with explicit `diff_mode` based on user preference:
+     - `live` for intermediate diffs,
+     - `final_only` for final diff only,
+     - `off` when diffs are not needed,
   2) inform the user that execution is in progress,
   3) poll `getCodexJob` using server hints:
      - wait `retry_after_seconds` if provided,
      - otherwise wait `poll_after_seconds` (default 15s),
      - polling status is read-only; gateway may long-poll and delay response to reduce request frequency,
-  4) when status is `completed`, call `getCodexJobResult` and return final result.
+  4) use diff signals from job status:
+     - `diff_live_available`, `diff_live_version`, `diff_final_available`, `diff_hint`, `diagnostic_diff_available`,
+  5) if `diff_mode=live` and `diff_live_version` increased, call `getCodexJobDiffLive` with `since_version`,
+  6) when `diff_final_available=true`, call `getCodexJobDiffFinal`,
+  7) when status is `completed`, call `getCodexJobResult` and return final result.
 
 Model and reasoning controls:
 - If the user asks to change model, pass `model` in `runCodexTask`.
@@ -53,6 +62,7 @@ Sandbox policy:
 - Write tasks: ask user confirmation, then run with danger-full-access.
 - Async job polling (`getCodexJob`, `getCodexJobResult`) is read-only and must not require repeated user confirmations.
 - Do not call `getCodexJobResult` while job status is `queued` or `running`.
+- If user requested final-only diffs, do not call live diff endpoint.
 
 Sandbox escalation policy:
 - If an action fails due to sandbox/permission restrictions,

@@ -78,6 +78,11 @@
             "minimum": 0,
             "maximum": 500,
             "default": 50
+          },
+          "diff_mode": {
+            "type": "string",
+            "enum": ["live", "final_only", "off"],
+            "default": "live"
           }
         },
         "additionalProperties": false
@@ -165,6 +170,12 @@
           "thread_id": { "type": ["string", "null"] },
           "last_event_method": { "type": ["string", "null"] },
           "last_update_text": { "type": ["string", "null"] },
+          "diff_mode": { "type": ["string", "null"] },
+          "diff_live_available": { "type": "boolean" },
+          "diff_live_version": { "type": "integer" },
+          "diff_final_available": { "type": "boolean" },
+          "diff_hint": { "type": ["string", "null"] },
+          "diagnostic_diff_available": { "type": "boolean" },
           "error": { "type": ["object", "null"], "properties": {}, "additionalProperties": true }
         },
         "additionalProperties": true
@@ -182,6 +193,50 @@
           "thread_id": { "type": ["string", "null"] },
           "error": { "type": ["object", "null"], "properties": {}, "additionalProperties": true },
           "result": { "$ref": "#/components/schemas/CodexResponse" }
+        },
+        "additionalProperties": true
+      },
+      "CodexJobLiveDiffResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "status": { "type": ["string", "null"] },
+          "diff_mode": { "type": ["string", "null"] },
+          "diff_live_available": { "type": "boolean" },
+          "diff_live_version": { "type": "integer" },
+          "updates": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": true }
+          }
+        },
+        "additionalProperties": true
+      },
+      "CodexJobFinalDiffResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "status": { "type": ["string", "null"] },
+          "has_diff": { "type": "boolean" },
+          "mode": { "type": ["string", "null"] },
+          "view": { "type": ["string", "null"] },
+          "diff": { "type": ["string", "null"] },
+          "files": {
+            "type": ["array", "null"],
+            "items": { "type": "object", "additionalProperties": true }
+          }
+        },
+        "additionalProperties": true
+      },
+      "CodexJobDebugTraceResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "status": { "type": ["string", "null"] },
+          "trace_count": { "type": "integer" },
+          "trace": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": true }
+          }
         },
         "additionalProperties": true
       },
@@ -389,6 +444,112 @@
           "404": { "description": "Job not found" },
           "409": { "description": "Job is still running" },
           "502": { "description": "Job failed" }
+        }
+      }
+    },
+    "/codex/jobs/{job_id}/diff/live": {
+      "get": {
+        "operationId": "getCodexJobDiffLive",
+        "summary": "Get live incremental diff updates for an async Codex job",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "since_version",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0, "default": 0 }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1000, "maximum": 2000000, "default": 200000 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live diff updates (if available)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CodexJobLiveDiffResponse" }
+              }
+            }
+          },
+          "404": { "description": "Job not found" }
+        }
+      }
+    },
+    "/codex/jobs/{job_id}/diff/final": {
+      "get": {
+        "operationId": "getCodexJobDiffFinal",
+        "summary": "Get final diff for an async Codex job",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["raw", "split"], "default": "raw" }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1000, "maximum": 2000000, "default": 200000 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Final diff (or diagnostic diff on failure)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CodexJobFinalDiffResponse" }
+              }
+            }
+          },
+          "404": { "description": "Job not found" },
+          "409": { "description": "Final diff not ready" }
+        }
+      }
+    },
+    "/codex/jobs/{job_id}/debug-trace": {
+      "get": {
+        "operationId": "getCodexJobDebugTrace",
+        "summary": "Get compact debug trace of WS events captured for a Codex job",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 200 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Debug trace",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CodexJobDebugTraceResponse" }
+              }
+            }
+          },
+          "404": { "description": "Job not found" }
         }
       }
     },
