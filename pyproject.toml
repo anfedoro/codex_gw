@@ -19,4 +19,4 @@ dependencies = [
 codex-gateway = "codex_gateway:main"
 
 [tool.setuptools]
-py-modules = ["codex_gateway"]
+py-modules = ["codex_gateway", "gpt_action_schema_template_data"]

@@ -487,12 +487,21 @@ def _gateway_base_url(request: Request) -> str:
 
 def _render_gpt_action_schema(base_url: str) -> dict:
     template_path = Path(__file__).resolve().parent / "gpt_action_schema.template.json"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Schema template not found")
-    try:
-        template = json.loads(template_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid schema template: {exc}") from exc
+    template: dict
+    if template_path.exists():
+        try:
+            template = json.loads(template_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Invalid schema template: {exc}") from exc
+    else:
+        # Installed tool mode fallback: template file may not be present
+        # next to the module, so use bundled JSON from a Python module.
+        try:
+            from gpt_action_schema_template_data import GPT_ACTION_SCHEMA_TEMPLATE_JSON
+
+            template = json.loads(GPT_ACTION_SCHEMA_TEMPLATE_JSON)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"Schema template not found: {exc}") from exc
 
     for server in template.get("servers", []):
         if server.get("url") == "https://<GATEWAY_HOST>":
