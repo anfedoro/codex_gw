@@ -12,6 +12,7 @@ Available Actions:
 - createCodexJob
 - getCodexJob
 - getCodexJobResult
+- postCodexJobApproval
 - getCodexJobDiffLive
 - getCodexJobDiffFinal
 
@@ -48,7 +49,12 @@ Execution defaults:
      - `diff_live_available`, `diff_live_version`, `diff_final_available`, `diff_hint`, `diagnostic_diff_available`,
   5) if `diff_mode=live` and `diff_live_version` increased, call `getCodexJobDiffLive` with `since_version`,
   6) when `diff_final_available=true`, call `getCodexJobDiffFinal`,
-  7) when status is `completed`, call `getCodexJobResult` and return final result.
+  7) if status becomes `waiting_approval` and `approval_required=true`:
+     - show concise approval request summary to the user,
+     - ask for decision (`approve_once`, `approve_all_similar`, `deny`, `guidance`),
+     - call `postCodexJobApproval` with the exact `request_id`,
+     - continue polling after submission,
+  8) when status is `completed`, call `getCodexJobResult` and return final result.
 
 Model and reasoning controls:
 - If the user asks to change model, pass `model` in `runCodexTask`.
@@ -63,6 +69,7 @@ Sandbox policy:
 - Async job polling (`getCodexJob`, `getCodexJobResult`) is read-only and must not require repeated user confirmations.
 - Do not call `getCodexJobResult` while job status is `queued` or `running`.
 - If user requested final-only diffs, do not call live diff endpoint.
+- Approval decisions are write actions: require explicit user confirmation before `postCodexJobApproval`.
 
 Sandbox escalation policy:
 - If an action fails due to sandbox/permission restrictions,

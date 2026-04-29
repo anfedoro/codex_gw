@@ -235,6 +235,12 @@ To avoid HTTP/proxy timeouts for long Codex operations, use async job endpoints:
    - If `diff_mode=final_only`: wait for `diff_final_available=true`, then call `GET /codex/jobs/{job_id}/diff/final`.
    - If `diff_mode=off`: skip diff endpoints unless diagnostics are needed.
 5. When status is `completed`, call `GET /codex/jobs/{job_id}/result`.
+6. If status is `waiting_approval`, ask user and submit decision:
+   - `POST /codex/jobs/{job_id}/approval`
+   - body:
+     - `request_id`
+     - `decision`: `approve_once | approve_all_similar | deny | guidance`
+     - `guidance_text` (required for `guidance`)
 
 Notes:
 - `GET /codex/jobs/{job_id}/result` returns:
@@ -250,6 +256,10 @@ Notes:
     - `diff_final_available`
     - `diff_hint`
     - `diagnostic_diff_available`
+  - Includes approval signals:
+    - `approval_required`
+    - `approval_request`
+    - `approval_policy_count`
 - `GET /codex/jobs/{job_id}/diff/live`:
   - Returns only incremental diff updates after `since_version`.
 - `GET /codex/jobs/{job_id}/diff/final`:

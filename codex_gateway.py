@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Awaitable, Callable, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -55,6 +55,7 @@ JOB_LONG_POLL_MAX_SECONDS = int(os.environ.get("GATEWAY_JOB_LONG_POLL_MAX_SECOND
 CODEX_SYNC_MAX_WAIT_SECONDS = int(os.environ.get("GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS", "20"))
 JOB_DEBUG_TRACE_ENABLED = os.environ.get("GATEWAY_JOB_DEBUG_TRACE_ENABLED", "1") == "1"
 JOB_DEBUG_TRACE_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_DEBUG_TRACE_MAX_ITEMS", "400"))
+APPROVAL_POLL_INTERVAL_SECONDS = float(os.environ.get("GATEWAY_APPROVAL_POLL_INTERVAL_SECONDS", "0.25"))
 JOBS: dict[str, dict] = {}
 JOB_COUNTER = itertools.count(1)
 PUBLIC_SCHEMA_ENABLED = os.environ.get("GATEWAY_PUBLIC_SCHEMA", "0") == "1"
@@ -243,6 +244,13 @@ class CodexJobRequest(BaseModel):
     payload: CodexRequest
 
 
+class CodexJobApprovalRequest(BaseModel):
+    request_id: int | str
+    decision: Literal["approve_once", "approve_all_similar", "deny", "guidance"]
+    guidance_text: str | None = None
+    scope_hint: str | None = None
+
+
 def _job_now() -> int:
     return int(time.time())
 
@@ -264,6 +272,9 @@ def _format_job_view(job: dict, include_result: bool = False) -> dict:
         "thread_id": job.get("thread_id"),
         "last_event_method": job.get("last_event_method"),
         "last_update_text": job.get("last_update_text"),
+        "approval_required": bool(job.get("approval_required", False)),
+        "approval_request": job.get("approval_request"),
+        "approval_policy_count": len(job.get("approval_policies", [])),
         "diff_mode": job.get("diff_mode"),
         "diff_live_available": bool(job.get("diff_live_available", False)),
         "diff_live_version": int(job.get("diff_live_version", 0) or 0),
@@ -399,6 +410,29 @@ def _register_diff_update(job: dict, method: str | None, diff_text: str) -> None
     else:
         # off mode: keep internal trace for potential diagnostics.
         job["diff_hint"] = "diff capture disabled"
+
+
+def _extract_approval_summary(method: str, params: dict) -> dict:
+    request_type = "unknown"
+    if "commandExecution" in method:
+        request_type = "command_execution"
+    elif "fileChange" in method:
+        request_type = "file_change"
+    elif "permissions" in method:
+        request_type = "permissions"
+
+    strings = _collect_strings(params)
+    summary = _short_text(" | ".join(strings), 220) if strings else method
+    return {
+        "request_type": request_type,
+        "summary": summary,
+    }
+
+
+def _approval_policy_key(approval_request: dict) -> str:
+    request_type = approval_request.get("request_type", "unknown")
+    summary = approval_request.get("summary", "")
+    return f"{request_type}:{summary[:120]}"
 
 
 def _append_job_debug_trace(job: dict, msg: dict) -> None:
@@ -642,6 +676,7 @@ async def _run_codex_via_app_server_ws(
     payload: CodexRequest,
     cwd: Path | None,
     on_update: Callable[[dict], None] | None = None,
+    on_server_request: Callable[[dict], Awaitable[dict]] | None = None,
 ) -> dict:
     try:
         from websockets.asyncio.client import connect as ws_connect
@@ -728,8 +763,18 @@ async def _run_codex_via_app_server_ws(
                 "item/commandExecution/requestApproval",
                 "item/fileChange/requestApproval",
             ):
-                LOGGER.warning("auto-decline server approval request method=%s", request_method)
-                await send(ws, {"id": request_id, "result": {"decision": "decline"}})
+                if on_server_request:
+                    decision_result = await on_server_request(
+                        {
+                            "id": request_id,
+                            "method": request_method,
+                            "params": msg.get("params", {}),
+                        }
+                    )
+                    await send(ws, {"id": request_id, "result": decision_result})
+                else:
+                    LOGGER.warning("auto-decline server approval request method=%s", request_method)
+                    await send(ws, {"id": request_id, "result": {"decision": "decline"}})
             else:
                 LOGGER.warning("unsupported server request method=%s", request_method)
                 await send(
@@ -1114,11 +1159,13 @@ async def post_codex(payload: CodexRequest) -> dict:
 
 
 async def _execute_codex(payload: CodexRequest) -> dict:
-    return await _execute_codex_with_updates(payload, on_update=None)
+    return await _execute_codex_with_updates(payload, on_update=None, on_server_request=None)
 
 
 async def _execute_codex_with_updates(
-    payload: CodexRequest, on_update: Callable[[dict], None] | None
+    payload: CodexRequest,
+    on_update: Callable[[dict], None] | None,
+    on_server_request: Callable[[dict], Awaitable[dict]] | None,
 ) -> dict:
     if payload.backend == "app_server_ws":
         # For remote app-server usage (including SSH tunnels), caller may not
@@ -1128,7 +1175,11 @@ async def _execute_codex_with_updates(
         # Run the WS client in a dedicated thread to avoid event-loop interaction
         # issues under ASGI runtimes.
         return await asyncio.to_thread(
-            lambda: asyncio.run(_run_codex_via_app_server_ws(payload, ws_cwd, on_update=on_update))
+            lambda: asyncio.run(
+                _run_codex_via_app_server_ws(
+                    payload, ws_cwd, on_update=on_update, on_server_request=on_server_request
+                )
+            )
         )
     cwd = Path(payload.cwd).resolve() if payload.cwd else REPO
     if not cwd.exists() or not cwd.is_dir():
@@ -1175,12 +1226,94 @@ async def _run_job(job_id: str) -> None:
         m = method if isinstance(method, str) else None
         _notify_job_update(m, wake_poll=_is_significant_ws_event(m, msg))
 
+    async def _on_server_request(req: dict) -> dict:
+        request_id = req["id"]
+        method = str(req.get("method", ""))
+        params = req.get("params", {}) if isinstance(req.get("params"), dict) else {}
+        meta = _extract_approval_summary(method, params)
+        approval_request = {
+            "request_id": request_id,
+            "method": method,
+            "request_type": meta["request_type"],
+            "summary": meta["summary"],
+            "created_at": _to_iso(_job_now()),
+            "params": params,
+            "options": ["approve_once", "approve_all_similar", "deny", "guidance"],
+        }
+        policy_key = _approval_policy_key(approval_request)
+
+        # Auto-apply previously approved policy.
+        for policy in job.get("approval_policies", []):
+            if policy.get("key") == policy_key:
+                job.setdefault("approval_history", []).append(
+                    {
+                        "request_id": request_id,
+                        "decision": "approve_all_similar(auto)",
+                        "at": _to_iso(_job_now()),
+                    }
+                )
+                _notify_job_update("job/approval_auto_applied", wake_poll=True)
+                return {"decision": "approve"}
+
+        job["approval_required"] = True
+        job["approval_request"] = approval_request
+        job["status"] = "waiting_approval"
+        _notify_job_update("job/waiting_approval", wake_poll=True)
+
+        while True:
+            decisions = job.get("approval_decisions", {})
+            if request_id in decisions:
+                decision = decisions.pop(request_id)
+                break
+            await asyncio.sleep(APPROVAL_POLL_INTERVAL_SECONDS)
+
+        job["approval_required"] = False
+        job["approval_request"] = None
+        job["status"] = "running"
+        job.setdefault("approval_history", []).append(
+            {
+                "request_id": request_id,
+                "decision": decision.get("decision"),
+                "at": _to_iso(_job_now()),
+            }
+        )
+        if decision.get("decision") == "approve_all_similar":
+            job.setdefault("approval_policies", []).append(
+                {
+                    "key": policy_key,
+                    "source_request_id": request_id,
+                    "created_at": _to_iso(_job_now()),
+                    "scope_hint": decision.get("scope_hint"),
+                }
+            )
+
+        if decision.get("decision") == "guidance":
+            guidance_text = (decision.get("guidance_text") or "").strip()
+            if guidance_text:
+                job["last_update_text"] = _short_text(
+                    f"Operator guidance received: {guidance_text}", 1000
+                )
+            _notify_job_update("job/approval_guidance", wake_poll=True)
+            return {"decision": "decline"}
+
+        if decision.get("decision") == "approve_once":
+            _notify_job_update("job/approval_approved", wake_poll=True)
+            return {"decision": "approve"}
+        if decision.get("decision") == "approve_all_similar":
+            _notify_job_update("job/approval_approved_all_similar", wake_poll=True)
+            return {"decision": "approve"}
+
+        _notify_job_update("job/approval_denied", wake_poll=True)
+        return {"decision": "decline"}
+
     job["status"] = "running"
     job["started_at"] = _job_now()
     job["updated_at"] = job["started_at"]
     _notify_job_update("job/running", wake_poll=True)
     try:
-        result = await _execute_codex_with_updates(job["payload"], on_update=_on_update)
+        result = await _execute_codex_with_updates(
+            job["payload"], on_update=_on_update, on_server_request=_on_server_request
+        )
         job["result"] = result
         if isinstance(result, dict):
             job["thread_id"] = result.get("thread_id")
@@ -1227,6 +1360,11 @@ def _create_job(payload: CodexRequest) -> dict:
         "next_poll_after": ts,
         "last_event_method": "job/queued",
         "last_update_text": None,
+        "approval_required": False,
+        "approval_request": None,
+        "approval_policies": [],
+        "approval_history": [],
+        "approval_decisions": {},
         "diff_mode": payload.diff_mode,
         "diff_live_available": False,
         "diff_live_version": 0,
@@ -1252,6 +1390,33 @@ def _create_job(payload: CodexRequest) -> dict:
 async def create_codex_job(request: CodexJobRequest) -> dict:
     job = _create_job(request.payload)
     return _format_job_view(job, include_result=False)
+
+
+@app.post("/codex/jobs/{job_id}/approval")
+async def post_codex_job_approval(job_id: str, payload: CodexJobApprovalRequest) -> dict:
+    _prune_jobs()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.get("approval_required") or not job.get("approval_request"):
+        raise HTTPException(status_code=409, detail="No pending approval for this job")
+
+    pending = job["approval_request"]
+    if str(pending.get("request_id")) != str(payload.request_id):
+        raise HTTPException(status_code=409, detail="request_id does not match current pending approval")
+
+    if payload.decision == "guidance" and not (payload.guidance_text or "").strip():
+        raise HTTPException(status_code=400, detail="guidance_text is required for guidance decision")
+
+    job.setdefault("approval_decisions", {})[pending["request_id"]] = {
+        "decision": payload.decision,
+        "guidance_text": payload.guidance_text,
+        "scope_hint": payload.scope_hint,
+    }
+    return {
+        "status": "ok",
+        "job": _format_job_view(job, include_result=False),
+    }
 
 
 @app.get("/codex/jobs/{job_id}")

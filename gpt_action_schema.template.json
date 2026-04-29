@@ -155,11 +155,25 @@
         "required": ["payload"],
         "additionalProperties": false
       },
+      "CodexJobApprovalRequest": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": ["integer", "string"] },
+          "decision": {
+            "type": "string",
+            "enum": ["approve_once", "approve_all_similar", "deny", "guidance"]
+          },
+          "guidance_text": { "type": "string" },
+          "scope_hint": { "type": "string" }
+        },
+        "required": ["request_id", "decision"],
+        "additionalProperties": false
+      },
       "CodexJobStatus": {
         "type": "object",
         "properties": {
           "job_id": { "type": "string" },
-          "status": { "type": "string", "enum": ["queued", "running", "completed", "failed"] },
+          "status": { "type": "string", "enum": ["queued", "running", "waiting_approval", "completed", "failed"] },
           "created_at": { "type": ["string", "null"] },
           "started_at": { "type": ["string", "null"] },
           "updated_at": { "type": ["string", "null"] },
@@ -170,6 +184,9 @@
           "thread_id": { "type": ["string", "null"] },
           "last_event_method": { "type": ["string", "null"] },
           "last_update_text": { "type": ["string", "null"] },
+          "approval_required": { "type": "boolean" },
+          "approval_request": { "type": ["object", "null"], "properties": {}, "additionalProperties": true },
+          "approval_policy_count": { "type": "integer" },
           "diff_mode": { "type": ["string", "null"] },
           "diff_live_available": { "type": "boolean" },
           "diff_live_version": { "type": "integer" },
@@ -417,6 +434,34 @@
             }
           },
           "404": { "description": "Job not found" }
+        }
+      }
+    },
+    "/codex/jobs/{job_id}/approval": {
+      "post": {
+        "operationId": "postCodexJobApproval",
+        "summary": "Submit decision for a pending approval request in an async Codex job",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CodexJobApprovalRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Approval decision accepted" },
+          "400": { "description": "Bad request" },
+          "404": { "description": "Job not found" },
+          "409": { "description": "No pending approval or request mismatch" }
         }
       }
     },
