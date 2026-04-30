@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import hmac
 import itertools
 import json
@@ -351,6 +352,36 @@ def _render_gpt_action_schema(base_url: str) -> dict:
     return template
 
 
+def _schema_hash(schema: dict) -> str:
+    canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _render_gpt_system_instruction() -> str:
+    template_path = Path(__file__).resolve().parent / "gpt_system_instruction.template.txt"
+    if template_path.exists():
+        try:
+            return template_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Invalid system instruction template: {exc}") from exc
+    try:
+        from gpt_system_instruction_template_data import GPT_SYSTEM_INSTRUCTION_TEMPLATE_TEXT
+
+        return GPT_SYSTEM_INSTRUCTION_TEMPLATE_TEXT
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"System instruction template not found: {exc}") from exc
+
+
+def _schema_import_urls(port: int) -> tuple[str, str | None]:
+    base = f"http://127.0.0.1:{port}"
+    plain = f"{base}/gpt-action-schema.json"
+    if SCHEMA_IMPORT_KEY and SCHEMA_IMPORT_KEY_PARAM:
+        secured = f"{plain}?{SCHEMA_IMPORT_KEY_PARAM}={SCHEMA_IMPORT_KEY}"
+        return secured, f"{plain}?{SCHEMA_IMPORT_KEY_PARAM}=<value>"
+    return plain, None
+
+
 def _to_iso(ts: int | None) -> str | None:
     if ts is None:
         return None
@@ -688,7 +719,21 @@ async def healthz() -> dict:
 
 @app.get("/gpt-action-schema.json")
 async def gpt_action_schema(request: Request) -> dict:
-    return _render_gpt_action_schema(_gateway_base_url(request))
+    schema = _render_gpt_action_schema(_gateway_base_url(request))
+    schema_hash = _schema_hash(schema)
+    schema["x-schema-hash"] = schema_hash
+    return JSONResponse(
+        content=schema,
+        headers={
+            "ETag": schema_hash,
+            "X-Schema-Sha256": schema_hash,
+        },
+    )
+
+
+@app.get("/gpt-system-instruction.txt")
+async def gpt_system_instruction() -> dict:
+    return {"instruction": _render_gpt_system_instruction()}
 
 
 @app.get("/projects")
@@ -1533,6 +1578,11 @@ def main() -> None:
         AUTH_DISABLED,
         APP_SERVER_URL,
     )
+    schema_import_url, schema_import_template = _schema_import_urls(args.port)
+    LOGGER.info("gpt-action schema import url=%s", schema_import_url)
+    if schema_import_template:
+        LOGGER.info("gpt-action schema import url template=%s", schema_import_template)
+    LOGGER.info("gpt-system instruction endpoint=http://127.0.0.1:%s/gpt-system-instruction.txt", args.port)
     if args.api_key is not None:
         GATEWAY_API_KEY = args.api_key.strip()
     else:

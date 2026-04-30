@@ -182,6 +182,7 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
 
 - `gpt_action_schema.template.json`: OpenAPI schema template for Custom GPT Actions.
 - `gpt_system_instruction.template.txt`: system instruction template for the Custom GPT.
+- `GET /gpt-system-instruction.txt`: returns current system instruction text used for GPT setup/testing.
 
 ### Import from URL
 
@@ -192,6 +193,7 @@ Gateway exposes a ready-to-import schema endpoint:
 Behavior:
 - Returns JSON schema based on `gpt_action_schema.template.json`.
 - Replaces `https://<GATEWAY_HOST>` with the current request host/protocol (supports reverse proxy headers).
+- Returns schema revision hash in body field `x-schema-hash` and headers `ETag` / `X-Schema-Sha256`.
 - Intended for ChatGPT "Import from URL" flow.
 - Endpoint is protected by gateway auth by default.
 - Set `GATEWAY_PUBLIC_SCHEMA=1` only if you explicitly want unauthenticated schema access.
@@ -200,6 +202,10 @@ Behavior:
   - `GATEWAY_SCHEMA_IMPORT_KEY_PARAM=<param_name>` (default: `schema_key`)
   - Example:
     - `https://cdx.avfserv.net/gpt-action-schema.json?schema_key=<value>`
+
+Startup logs also print ready-to-use URLs for:
+- action schema import
+- system instruction endpoint
 
 ## Project/Thread Discovery
 
