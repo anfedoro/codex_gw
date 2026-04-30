@@ -157,6 +157,17 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
   - Purpose: Codex executable path used by managed app-server mode.
   - Default: `codex`.
 
+### Protocol schema registry
+
+- `GATEWAY_PROTOCOL_SCHEMA_GENERATE`
+  - Purpose: try runtime generation of fresh protocol schemas before fallback load.
+  - Values: `1` enable, `0` disable.
+  - Default: `0`.
+
+- `GATEWAY_PROTOCOL_SCHEMA_CODEX_BIN`
+  - Purpose: Codex binary used for protocol schema generation.
+  - Default: `codex`.
+
 ### Logging and debug
 
 - `GATEWAY_DEBUG`
@@ -178,11 +189,29 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
   - Values: `1` to enable.
   - Default: `1`.
 
+Structured lifecycle logs:
+- Protocol registry access:
+  - `event=protocol.list`
+  - `event=protocol.get`
+- Approval lifecycle:
+  - `event=approval.request`
+  - `event=approval.decision`
+  - `event=approval.applied`
+
 ## GPT Action Assets
 
 - `gpt_action_schema.template.json`: OpenAPI schema template for Custom GPT Actions.
 - `gpt_system_instruction.template.txt`: system instruction template for the Custom GPT.
 - `GET /gpt-system-instruction.txt`: returns current system instruction text used for GPT setup/testing.
+
+The imported GPT OpenAPI is intentionally minimal (continuity-oriented):
+- `getGatewayHealth`
+- `createCodexJob`
+- `getCodexJob`
+- `postCodexJobApproval`
+- `getCodexJobResult`
+- `getProtocolSchemas`
+- `getProtocolSchemaById`
 
 ### Import from URL
 
@@ -207,29 +236,19 @@ Startup logs also print ready-to-use URLs for:
 - action schema import
 - system instruction endpoint
 
-## Project/Thread Discovery
+## Protocol Schema Registry
 
-The gateway supports project and thread discovery based on local Codex state:
+The gateway exposes an in-memory protocol schema registry:
 
-- `GET /projects`
-  - Returns projects grouped by `cwd` (project folder).
-  - Includes thread count and latest update time.
-  - By default, returns only entries whose `cwd` exists on the current host (`existing_only=true`).
+- `GET /protocol/schemas`
+  - Returns full schema index (`id`, `name`, `group`, `path`, `sha256`, `size_bytes`).
+- `GET /protocol/schema?schema_id=<id>`
+  - Returns full JSON schema by id.
 
-- `GET /threads?cwd=<absolute_folder_path>&limit=<n>`
-  - Returns threads sorted by most recent update.
-  - If `cwd` is provided, returns only threads for that project.
-  - By default, returns only entries whose `cwd` exists on the current host (`existing_only=true`).
-
-- `GET /threads/{thread_id}`
-  - Returns metadata for a single thread.
-
-Recommended GPT flow:
-1. Call `getProjects`.
-2. Ask user to select a project folder or request a new thread.
-3. Call `getThreads` filtered by selected `cwd`.
-4. Ask user which thread to resume.
-5. Call `runCodexTask` with `kind="resume"` and selected `session_id`.
+Registry lifecycle:
+- startup loads schemas into memory (generated source when enabled, fallback from `protocol/` otherwise),
+- temporary generated schema files are deleted after loading,
+- requests are served from memory only.
 
 ## Long-Running Tasks (Async Jobs)
 

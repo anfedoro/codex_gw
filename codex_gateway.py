@@ -25,9 +25,11 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from cgw.auth import extract_api_key_from_request, token_fingerprint
+from cgw.approval import map_approval_decision
 from cgw.config import GatewayConfig
 from cgw.jobs import format_job_view, is_significant_ws_event, job_now, parse_unified_diff, prune_jobs
 from cgw.models import CodexJobApprovalRequest, CodexJobRequest, CodexRequest, TaskRequest
+from cgw.protocol_registry import ProtocolRegistryError, build_registry_with_optional_generation
 from cgw.state_db import query_state_db, thread_display_name
 from cgw.text_utils import clip_text, short_text, tail_file
 
@@ -67,6 +69,18 @@ JOB_COUNTER = itertools.count(1)
 PUBLIC_SCHEMA_ENABLED = _CONFIG.public_schema_enabled
 SCHEMA_IMPORT_KEY = _CONFIG.schema_import_key
 SCHEMA_IMPORT_KEY_PARAM = _CONFIG.schema_import_key_param
+PROTOCOL_SCHEMA_GENERATE_ENABLED = os.environ.get("GATEWAY_PROTOCOL_SCHEMA_GENERATE", "0") == "1"
+PROTOCOL_SCHEMA_CODEX_BIN = os.environ.get("GATEWAY_PROTOCOL_SCHEMA_CODEX_BIN", "codex").strip()
+PROTOCOL_REGISTRY: dict = {
+    "loaded": False,
+    "source": None,
+    "schema_count": 0,
+    "registry_hash": None,
+    "index": [],
+    "schemas_by_id": {},
+    "loaded_at_epoch": None,
+    "errors": [],
+}
 
 
 def _configure_logging() -> None:
@@ -380,6 +394,29 @@ def _schema_import_urls(port: int) -> tuple[str, str | None]:
         secured = f"{plain}?{SCHEMA_IMPORT_KEY_PARAM}={SCHEMA_IMPORT_KEY}"
         return secured, f"{plain}?{SCHEMA_IMPORT_KEY_PARAM}=<value>"
     return plain, None
+
+
+def _load_protocol_registry() -> None:
+    global PROTOCOL_REGISTRY
+    protocol_dir = Path(__file__).resolve().parent / "protocol"
+    try:
+        PROTOCOL_REGISTRY = build_registry_with_optional_generation(
+            repo_root=REPO,
+            protocol_fallback_dir=protocol_dir,
+            codex_bin=PROTOCOL_SCHEMA_CODEX_BIN,
+            generate_enabled=PROTOCOL_SCHEMA_GENERATE_ENABLED,
+        )
+        LOGGER.info(
+            "protocol registry loaded source=%s schema_count=%s registry_hash=%s",
+            PROTOCOL_REGISTRY.get("source"),
+            PROTOCOL_REGISTRY.get("schema_count"),
+            PROTOCOL_REGISTRY.get("registry_hash"),
+        )
+        for err in PROTOCOL_REGISTRY.get("errors", []):
+            LOGGER.warning("protocol registry warning: %s", err)
+    except ProtocolRegistryError as exc:
+        LOGGER.error("protocol registry failed: %s", exc)
+        raise RuntimeError(f"Protocol registry init failed: {exc}") from exc
 
 
 def _to_iso(ts: int | None) -> str | None:
@@ -714,6 +751,10 @@ async def healthz() -> dict:
             "pid": MANAGED_APP_SERVER_PROCESS.pid if managed_running and MANAGED_APP_SERVER_PROCESS else None,
             "listen_url": MANAGED_APP_SERVER_LISTEN_URL,
         },
+        "protocol_registry_loaded": bool(PROTOCOL_REGISTRY.get("loaded")),
+        "protocol_schema_count": int(PROTOCOL_REGISTRY.get("schema_count") or 0),
+        "protocol_registry_hash": PROTOCOL_REGISTRY.get("registry_hash"),
+        "protocol_source": PROTOCOL_REGISTRY.get("source"),
     }
 
 
@@ -734,6 +775,51 @@ async def gpt_action_schema(request: Request) -> dict:
 @app.get("/gpt-system-instruction.txt")
 async def gpt_system_instruction() -> dict:
     return {"instruction": _render_gpt_system_instruction()}
+
+
+@app.get("/protocol/schemas")
+async def list_protocol_schemas() -> dict:
+    data = PROTOCOL_REGISTRY.get("index", [])
+    LOGGER.info(
+        "event=protocol.list requested_count=all returned_count=%s source=%s registry_hash=%s",
+        len(data),
+        PROTOCOL_REGISTRY.get("source"),
+        PROTOCOL_REGISTRY.get("registry_hash"),
+    )
+    return {
+        "source": PROTOCOL_REGISTRY.get("source"),
+        "registry_hash": PROTOCOL_REGISTRY.get("registry_hash"),
+        "schema_count": PROTOCOL_REGISTRY.get("schema_count"),
+        "data": data,
+    }
+
+
+@app.get("/protocol/schemas/{schema_id:path}")
+async def get_protocol_schema(schema_id: str) -> dict:
+    schemas = PROTOCOL_REGISTRY.get("schemas_by_id", {})
+    schema = schemas.get(schema_id)
+    if schema is None:
+        LOGGER.info("event=protocol.get schema_id=%s found=false", schema_id)
+        raise HTTPException(status_code=404, detail=f"Schema not found: {schema_id}")
+    meta = next((x for x in PROTOCOL_REGISTRY.get("index", []) if x.get("id") == schema_id), None)
+    LOGGER.info(
+        "event=protocol.get schema_id=%s found=true sha256=%s size_bytes=%s",
+        schema_id,
+        meta.get("sha256") if meta else None,
+        meta.get("size_bytes") if meta else None,
+    )
+    return {
+        "id": schema_id,
+        "meta": meta,
+        "schema": schema,
+    }
+
+
+@app.get("/protocol/schema")
+async def get_protocol_schema_query(
+    schema_id: str = Query(..., description="Schema id from /protocol/schemas list")
+) -> dict:
+    return await get_protocol_schema(schema_id)
 
 
 @app.get("/projects")
@@ -1063,6 +1149,16 @@ async def _run_job(job_id: str) -> None:
             "params": params,
             "options": ["approve_once", "approve_all_similar", "deny", "guidance"],
         }
+        LOGGER.info(
+            "event=approval.request job_id=%s thread_id=%s request_id=%s request_type=%s summary=%s command=%s cwd=%s",
+            job_id,
+            job.get("thread_id"),
+            request_id,
+            meta.get("request_type"),
+            short_text(meta.get("summary", ""), 200),
+            short_text(str(params.get("command", "")), 200),
+            params.get("cwd"),
+        )
         policy_key = _approval_policy_key(approval_request)
 
         # Auto-apply previously approved policy.
@@ -1076,7 +1172,16 @@ async def _run_job(job_id: str) -> None:
                     }
                 )
                 _notify_job_update("job/approval_auto_applied", wake_poll=True)
-                return {"decision": "approve"}
+                wire_payload, mapped_variant = map_approval_decision(
+                    "approve_all_similar", params=params
+                )
+                LOGGER.info(
+                    "event=approval.applied job_id=%s request_id=%s ws_status=accepted mapped_wire_decision=%s mode=auto",
+                    job_id,
+                    request_id,
+                    mapped_variant,
+                )
+                return wire_payload
 
         job["approval_required"] = True
         job["approval_request"] = approval_request
@@ -1117,17 +1222,28 @@ async def _run_job(job_id: str) -> None:
                     f"Operator guidance received: {guidance_text}", 1000
                 )
             _notify_job_update("job/approval_guidance", wake_poll=True)
-            return {"decision": "decline"}
-
-        if decision.get("decision") == "approve_once":
+        chosen = str(decision.get("decision") or "deny")
+        if chosen == "approve_once":
             _notify_job_update("job/approval_approved", wake_poll=True)
-            return {"decision": "approve"}
-        if decision.get("decision") == "approve_all_similar":
+        elif chosen == "approve_all_similar":
             _notify_job_update("job/approval_approved_all_similar", wake_poll=True)
-            return {"decision": "approve"}
-
-        _notify_job_update("job/approval_denied", wake_poll=True)
-        return {"decision": "decline"}
+        elif chosen == "guidance":
+            _notify_job_update("job/approval_guidance", wake_poll=True)
+        else:
+            _notify_job_update("job/approval_denied", wake_poll=True)
+        wire_payload, mapped_variant = map_approval_decision(
+            chosen,
+            params=params,
+            scope_hint=decision.get("scope_hint"),
+            guidance_text=decision.get("guidance_text"),
+        )
+        LOGGER.info(
+            "event=approval.applied job_id=%s request_id=%s ws_status=accepted mapped_wire_decision=%s mode=manual",
+            job_id,
+            request_id,
+            mapped_variant,
+        )
+        return wire_payload
 
     job["status"] = "running"
     job["started_at"] = job_now()
@@ -1236,6 +1352,14 @@ async def post_codex_job_approval(job_id: str, payload: CodexJobApprovalRequest)
         "guidance_text": payload.guidance_text,
         "scope_hint": payload.scope_hint,
     }
+    LOGGER.info(
+        "event=approval.decision job_id=%s thread_id=%s request_id=%s decision=%s scope_hint=%s",
+        job_id,
+        job.get("thread_id"),
+        pending["request_id"],
+        payload.decision,
+        payload.scope_hint,
+    )
     return {
         "status": "ok",
         "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
@@ -1570,6 +1694,7 @@ def main() -> None:
     LOG_FILE = args.log_file.strip()
     LOG_REQUESTS = args.log_requests
     _configure_logging()
+    _load_protocol_registry()
     LOGGER.info(
         "gateway startup repo=%s host=%s port=%s auth_disabled=%s app_server_url=%s",
         REPO,
