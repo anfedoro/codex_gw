@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import hmac
 import itertools
 import json
@@ -24,7 +23,9 @@ from typing import Awaitable, Callable, Literal
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+
+from cgw.auth import extract_api_key_from_request, extract_bearer_token, token_fingerprint
+from cgw.models import CodexJobApprovalRequest, CodexJobRequest, CodexRequest, TaskRequest
 
 
 app = FastAPI(title="Codex Gateway", version="1.0.0")
@@ -98,33 +99,6 @@ def _tail_file(path: Path, max_lines: int) -> list[str]:
     return data[-max_lines:]
 
 
-def _extract_bearer_token(authorization_header: str | None) -> str | None:
-    if not authorization_header:
-        return None
-    scheme, _, token = authorization_header.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return None
-    return token.strip()
-
-
-def _extract_api_key_from_request(request: Request) -> str | None:
-    bearer = _extract_bearer_token(request.headers.get("Authorization"))
-    if bearer:
-        return bearer
-    if GATEWAY_API_KEY_HEADER:
-        raw = request.headers.get(GATEWAY_API_KEY_HEADER)
-        if raw:
-            return raw.strip()
-    return None
-
-
-def _token_fingerprint(token: str | None) -> str:
-    if not token:
-        return "none"
-    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
-    return f"len={len(token)} sha256_12={digest}"
-
-
 def _start_managed_app_server(codex_bin: str, listen_url: str) -> None:
     global MANAGED_APP_SERVER_PROCESS, MANAGED_APP_SERVER_LISTEN_URL, MANAGED_APP_SERVER_STARTED_BY_GATEWAY
     if MANAGED_APP_SERVER_PROCESS and MANAGED_APP_SERVER_PROCESS.poll() is None:
@@ -172,7 +146,7 @@ async def require_bearer_api_key(request: Request, call_next):
     # Authentication is enabled when CODEX_GATEWAY_API_KEY is set and
     # GATEWAY_DISABLE_AUTH is not set to 1.
     if GATEWAY_API_KEY and not AUTH_DISABLED:
-        token = _extract_api_key_from_request(request)
+        token = extract_api_key_from_request(request, GATEWAY_API_KEY_HEADER)
         if not token or not hmac.compare_digest(token, GATEWAY_API_KEY):
             has_auth_header = bool(request.headers.get("Authorization"))
             has_api_key_header = bool(
@@ -185,8 +159,8 @@ async def require_bearer_api_key(request: Request, call_next):
                 has_auth_header,
                 has_api_key_header,
                 GATEWAY_API_KEY_HEADER,
-                _token_fingerprint(token),
-                _token_fingerprint(GATEWAY_API_KEY),
+                token_fingerprint(token),
+                token_fingerprint(GATEWAY_API_KEY),
             )
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     response = await call_next(request)
@@ -200,55 +174,6 @@ async def require_bearer_api_key(request: Request, call_next):
             duration_ms,
         )
     return response
-
-
-class TaskRequest(BaseModel):
-    text: str = ""
-
-
-class CodexRequest(BaseModel):
-    backend: Literal["exec", "app_server_ws"] = "exec"
-    kind: Literal["new", "resume"] = "new"
-    session_id: str | None = None
-    prompt: str | None = None
-    cwd: str | None = None
-    profile: str | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    sandbox: str | None = None
-    approvals: str | None = None
-    search: bool = False
-    use_exec: bool = Field(
-        default=True,
-        description="Use `codex exec` (recommended for non-interactive gateway usage).",
-    )
-    app_server_url: str | None = None
-    app_server_bearer_token: str | None = None
-    include_events: bool = Field(
-        default=False,
-        description="Include raw app-server events in response for debugging.",
-    )
-    max_events: int = Field(
-        default=50,
-        ge=0,
-        le=500,
-        description="Maximum number of app-server events to keep when include_events=true.",
-    )
-    diff_mode: Literal["live", "final_only", "off"] = Field(
-        default="live",
-        description="Diff orchestration mode for async jobs.",
-    )
-
-
-class CodexJobRequest(BaseModel):
-    payload: CodexRequest
-
-
-class CodexJobApprovalRequest(BaseModel):
-    request_id: int | str
-    decision: Literal["approve_once", "approve_all_similar", "deny", "guidance"]
-    guidance_text: str | None = None
-    scope_hint: str | None = None
 
 
 def _job_now() -> int:

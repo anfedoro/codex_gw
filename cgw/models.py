@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class TaskRequest(BaseModel):
+    text: str = ""
+
+
+class CodexRequest(BaseModel):
+    backend: Literal["exec", "app_server_ws"] = "exec"
+    kind: Literal["new", "resume"] = "new"
+    session_id: str | None = None
+    prompt: str | None = None
+    cwd: str | None = None
+    profile: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    sandbox: str | None = None
+    approvals: str | None = None
+    search: bool = False
+    use_exec: bool = Field(
+        default=True,
+        description="Use `codex exec` (recommended for non-interactive gateway usage).",
+    )
+    app_server_url: str | None = None
+    app_server_bearer_token: str | None = None
+    include_events: bool = Field(
+        default=False,
+        description="Include raw app-server events in response for debugging.",
+    )
+    max_events: int = Field(
+        default=50,
+        ge=0,
+        le=500,
+        description="Maximum number of app-server events to keep when include_events=true.",
+    )
+    diff_mode: Literal["live", "final_only", "off"] = Field(
+        default="live",
+        description="Diff orchestration mode for async jobs.",
+    )
+
+
+class CodexJobRequest(BaseModel):
+    payload: CodexRequest
+
+
+class CodexJobApprovalRequest(BaseModel):
+    request_id: int | str
+    decision: Literal["approve_once", "approve_all_similar", "deny", "guidance"]
+    guidance_text: str | None = None
+    scope_hint: str | None = None
+
