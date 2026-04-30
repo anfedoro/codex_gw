@@ -202,10 +202,12 @@ The gateway supports project and thread discovery based on local Codex state:
 - `GET /projects`
   - Returns projects grouped by `cwd` (project folder).
   - Includes thread count and latest update time.
+  - By default, returns only entries whose `cwd` exists on the current host (`existing_only=true`).
 
 - `GET /threads?cwd=<absolute_folder_path>&limit=<n>`
   - Returns threads sorted by most recent update.
   - If `cwd` is provided, returns only threads for that project.
+  - By default, returns only entries whose `cwd` exists on the current host (`existing_only=true`).
 
 - `GET /threads/{thread_id}`
   - Returns metadata for a single thread.
@@ -273,6 +275,7 @@ Notes:
 `POST /codex` remains available for compatibility.
 
 For `backend=app_server_ws`, gateway now:
+- validates `cwd` early; if the directory does not exist, returns `400` immediately,
 - starts internal async job,
 - waits up to `GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS`,
 - if finished quickly: returns normal final Codex result,

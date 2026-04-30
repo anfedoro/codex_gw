@@ -513,6 +513,17 @@ def _resolve_repo_path(path: str) -> Path:
     return target
 
 
+def _validate_app_server_cwd(cwd_value: str | None) -> Path | None:
+    if not cwd_value:
+        return None
+    cwd = Path(cwd_value).expanduser().resolve()
+    if not cwd.exists():
+        raise HTTPException(status_code=400, detail=f"cwd does not exist: {cwd}")
+    if not cwd.is_dir():
+        raise HTTPException(status_code=400, detail=f"cwd is not a directory: {cwd}")
+    return cwd
+
+
 def _gateway_base_url(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
@@ -926,7 +937,10 @@ async def gpt_action_schema(request: Request) -> dict:
 
 
 @app.get("/projects")
-async def list_projects(limit: int = Query(default=200, ge=1, le=5000)) -> dict:
+async def list_projects(
+    limit: int = Query(default=200, ge=1, le=5000),
+    existing_only: bool = Query(default=True, description="Return only projects with existing cwd"),
+) -> dict:
     sql = """
     SELECT
       cwd,
@@ -944,6 +958,8 @@ async def list_projects(limit: int = Query(default=200, ge=1, le=5000)) -> dict:
     data = []
     for row in rows:
         cwd = row["cwd"]
+        if existing_only and (not cwd or not Path(cwd).exists() or not Path(cwd).is_dir()):
+            continue
         data.append(
             {
                 "project_id": cwd,
@@ -960,6 +976,7 @@ async def list_projects(limit: int = Query(default=200, ge=1, le=5000)) -> dict:
 async def list_threads(
     cwd: str | None = Query(default=None, description="Exact project folder path"),
     limit: int = Query(default=100, ge=1, le=5000),
+    existing_only: bool = Query(default=True, description="Return only threads with existing cwd"),
 ) -> dict:
     sql_base = """
     SELECT
@@ -984,20 +1001,23 @@ async def list_threads(
     state_db, rows = _query_state_db(sql_base, tuple(args))
     data = []
     for row in rows:
+        thread_cwd = row["cwd"]
+        if existing_only and (not thread_cwd or not Path(thread_cwd).exists() or not Path(thread_cwd).is_dir()):
+            continue
         title = row["title"] or ""
         first_msg = row["first_user_message"] or ""
         preview = _short_text(title if title else first_msg, 220)
-        display_name = _thread_display_name(row["cwd"], title, first_msg, row["id"])
+        display_name = _thread_display_name(thread_cwd, title, first_msg, row["id"])
         data.append(
             {
                 "thread_id": row["id"],
                 "short_thread_id": str(row["id"])[:8],
-                "project_name": Path(row["cwd"]).name if row["cwd"] else None,
+                "project_name": Path(thread_cwd).name if thread_cwd else None,
                 "title": title,
                 "first_user_message": _short_text(first_msg, 220),
                 "preview": preview,
                 "display_name": display_name,
-                "cwd": row["cwd"],
+                "cwd": thread_cwd,
                 "created_at": _to_iso(row["created_at"]),
                 "updated_at": _to_iso(row["updated_at"]),
                 "model_provider": row["model_provider"],
@@ -1129,6 +1149,9 @@ async def post_codex(payload: CodexRequest) -> dict:
         payload.include_events,
         payload.max_events,
     )
+    # Fail fast for invalid cwd in app_server_ws mode.
+    if payload.backend == "app_server_ws":
+        _validate_app_server_cwd(payload.cwd)
     # Keep sync API for compatibility, but avoid proxy timeouts:
     # run as background job and wait a short window for completion.
     if payload.backend == "app_server_ws":
@@ -1171,7 +1194,7 @@ async def _execute_codex_with_updates(
         # For remote app-server usage (including SSH tunnels), caller may not
         # know remote absolute paths in advance. In that case we start without
         # cwd override and return server-selected cwd in thread/start response.
-        ws_cwd: Path | None = Path(payload.cwd).resolve() if payload.cwd else None
+        ws_cwd = _validate_app_server_cwd(payload.cwd)
         # Run the WS client in a dedicated thread to avoid event-loop interaction
         # issues under ASGI runtimes.
         return await asyncio.to_thread(
