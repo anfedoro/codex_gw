@@ -12,6 +12,12 @@ This project is managed with `uv` and uses `pyproject.toml` for dependencies and
 uv sync
 ```
 
+### Run tests
+
+```bash
+uv run --extra dev pytest -q
+```
+
 ### Run locally from the project
 
 ```bash

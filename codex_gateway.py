@@ -12,20 +12,22 @@ import itertools
 import json
 import logging
 import os
-import sqlite3
 import subprocess
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from cgw.auth import extract_api_key_from_request, extract_bearer_token, token_fingerprint
+from cgw.auth import extract_api_key_from_request, token_fingerprint
+from cgw.jobs import format_job_view, is_significant_ws_event, job_now, parse_unified_diff, prune_jobs
 from cgw.models import CodexJobApprovalRequest, CodexJobRequest, CodexRequest, TaskRequest
+from cgw.state_db import query_state_db, thread_display_name
+from cgw.text_utils import clip_text, short_text, tail_file
 
 
 app = FastAPI(title="Codex Gateway", version="1.0.0")
@@ -84,19 +86,6 @@ def _configure_logging() -> None:
         DEBUG_MODE,
         LOG_FILE or "<stdout-only>",
     )
-
-
-def _clip_text(value: str, max_chars: int) -> tuple[str, bool]:
-    if max_chars <= 0 or len(value) <= max_chars:
-        return value, False
-    return value[:max_chars], True
-
-
-def _tail_file(path: Path, max_lines: int) -> list[str]:
-    data = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    if max_lines <= 0:
-        return []
-    return data[-max_lines:]
 
 
 def _start_managed_app_server(codex_bin: str, listen_url: str) -> None:
@@ -176,80 +165,6 @@ async def require_bearer_api_key(request: Request, call_next):
     return response
 
 
-def _job_now() -> int:
-    return int(time.time())
-
-
-def _format_job_view(job: dict, include_result: bool = False) -> dict:
-    now = _job_now()
-    next_poll_after = int(job.get("next_poll_after", 0) or 0)
-    retry_after_seconds = max(0, next_poll_after - now)
-    out = {
-        "job_id": job["job_id"],
-        "status": job["status"],
-        "created_at": _to_iso(job.get("created_at")),
-        "started_at": _to_iso(job.get("started_at")),
-        "updated_at": _to_iso(job.get("updated_at")),
-        "completed_at": _to_iso(job.get("completed_at")),
-        "poll_after_seconds": JOB_POLL_AFTER_SECONDS,
-        "next_poll_after_at": _to_iso(next_poll_after) if next_poll_after > 0 else None,
-        "retry_after_seconds": retry_after_seconds,
-        "thread_id": job.get("thread_id"),
-        "last_event_method": job.get("last_event_method"),
-        "last_update_text": job.get("last_update_text"),
-        "approval_required": bool(job.get("approval_required", False)),
-        "approval_request": job.get("approval_request"),
-        "approval_policy_count": len(job.get("approval_policies", [])),
-        "diff_mode": job.get("diff_mode"),
-        "diff_live_available": bool(job.get("diff_live_available", False)),
-        "diff_live_version": int(job.get("diff_live_version", 0) or 0),
-        "diff_final_available": bool(job.get("diff_final_available", False)),
-        "diff_hint": job.get("diff_hint"),
-        "diagnostic_diff_available": bool(job.get("diagnostic_diff_available", False)),
-        "error": job.get("error"),
-    }
-    if include_result:
-        out["result"] = job.get("result")
-    return out
-
-
-def _prune_jobs() -> None:
-    now = _job_now()
-    drop_ids = []
-    for job_id, job in JOBS.items():
-        done = job["status"] in {"completed", "failed"}
-        is_expired = done and (now - int(job.get("updated_at", now)) > JOB_TTL_SECONDS)
-        if is_expired:
-            drop_ids.append(job_id)
-    for job_id in drop_ids:
-        JOBS.pop(job_id, None)
-    if len(JOBS) <= JOB_MAX_ITEMS:
-        return
-    # Keep newest entries first, drop oldest overflow.
-    overflow = len(JOBS) - JOB_MAX_ITEMS
-    oldest = sorted(JOBS.values(), key=lambda j: int(j.get("updated_at", 0)))[:overflow]
-    for job in oldest:
-        JOBS.pop(job["job_id"], None)
-
-
-def _is_significant_ws_event(method: str | None, msg: dict) -> bool:
-    if not method:
-        return False
-    # Terminal/critical markers should wake long-poll immediately.
-    if method in {
-        "turn/completed",
-        "item/completed",
-        "error",
-    }:
-        if method == "item/completed":
-            item = msg.get("params", {}).get("item", {})
-            # Wake early only for completed assistant message.
-            return item.get("type") == "agent_message"
-        return True
-    # Everything else (deltas, started notifications, token usage updates) is non-critical.
-    return False
-
-
 def _collect_strings(obj) -> list[str]:
     out: list[str] = []
     if isinstance(obj, str):
@@ -309,7 +224,7 @@ def _extract_best_diff_text(msg: dict) -> str | None:
 def _register_diff_update(job: dict, method: str | None, diff_text: str) -> None:
     capped_diff = diff_text[:400000]
     mode = job.get("diff_mode", "live")
-    now_iso = _to_iso(_job_now())
+    now_iso = _to_iso(job_now())
     job["latest_diff_text"] = capped_diff
 
     if mode == "live":
@@ -347,7 +262,7 @@ def _extract_approval_summary(method: str, params: dict) -> dict:
         request_type = "permissions"
 
     strings = _collect_strings(params)
-    summary = _short_text(" | ".join(strings), 220) if strings else method
+    summary = short_text(" | ".join(strings), 220) if strings else method
     return {
         "request_type": request_type,
         "summary": summary,
@@ -369,7 +284,7 @@ def _append_job_debug_trace(job: dict, msg: dict) -> None:
     method = msg.get("method")
     params = msg.get("params")
     row = {
-        "ts": _to_iso(_job_now()),
+        "ts": _to_iso(job_now()),
         "method": method if isinstance(method, str) else None,
         "param_keys": sorted(list(params.keys())) if isinstance(params, dict) else [],
         "diff_like_keys_present": {
@@ -382,51 +297,6 @@ def _append_job_debug_trace(job: dict, msg: dict) -> None:
     trace.append(row)
     if len(trace) > JOB_DEBUG_TRACE_MAX_ITEMS:
         del trace[: len(trace) - JOB_DEBUG_TRACE_MAX_ITEMS]
-
-
-def _parse_unified_diff(raw: str) -> list[dict]:
-    files: list[dict] = []
-    current_file: dict | None = None
-    current_hunk: dict | None = None
-
-    for line in raw.splitlines():
-        if line.startswith("diff --git "):
-            current_file = {
-                "old_path": None,
-                "new_path": None,
-                "hunks": [],
-            }
-            files.append(current_file)
-            current_hunk = None
-            continue
-        if current_file is None:
-            continue
-        if line.startswith("--- "):
-            current_file["old_path"] = line[4:].strip()
-            continue
-        if line.startswith("+++ "):
-            current_file["new_path"] = line[4:].strip()
-            continue
-        if line.startswith("@@ "):
-            current_hunk = {
-                "header": line,
-                "old_lines": [],
-                "new_lines": [],
-                "context_lines": [],
-            }
-            current_file["hunks"].append(current_hunk)
-            continue
-        if current_hunk is None:
-            continue
-        if line.startswith("+") and not line.startswith("+++ "):
-            current_hunk["new_lines"].append(line[1:])
-        elif line.startswith("-") and not line.startswith("--- "):
-            current_hunk["old_lines"].append(line[1:])
-        else:
-            txt = line[1:] if line.startswith(" ") else line
-            current_hunk["context_lines"].append(txt)
-
-    return files
 
 
 def _resolve_repo_path(path: str) -> Path:
@@ -479,18 +349,6 @@ def _render_gpt_action_schema(base_url: str) -> dict:
     return template
 
 
-def _codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
-
-
-def _find_state_db() -> Path | None:
-    home = _codex_home()
-    candidates = sorted(home.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        return None
-    return candidates[0]
-
-
 def _to_iso(ts: int | None) -> str | None:
     if ts is None:
         return None
@@ -498,36 +356,6 @@ def _to_iso(ts: int | None) -> str | None:
         return datetime.fromtimestamp(int(ts), tz=UTC).isoformat()
     except Exception:
         return None
-
-
-def _single_line(text: str) -> str:
-    return " ".join((text or "").split())
-
-
-def _short_text(text: str, limit: int = 120) -> str:
-    t = _single_line(text)
-    if len(t) <= limit:
-        return t
-    return t[: limit - 1].rstrip() + "…"
-
-
-def _thread_display_name(cwd: str | None, title: str, first_msg: str, thread_id: str) -> str:
-    project = Path(cwd).name if cwd else "project"
-    base = title or first_msg or thread_id
-    return f"{project}: {_short_text(base, 90)}"
-
-
-def _query_state_db(sql: str, args: tuple = ()) -> tuple[Path, list[sqlite3.Row]]:
-    state_db = _find_state_db()
-    if state_db is None:
-        raise HTTPException(status_code=404, detail="Codex state DB not found")
-    conn = sqlite3.connect(state_db)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = list(conn.execute(sql, args))
-    finally:
-        conn.close()
-    return state_db, rows
 
 
 def _run_command(cmd: list[str], cwd: Path, timeout: int) -> dict:
@@ -547,8 +375,8 @@ def _run_command(cmd: list[str], cwd: Path, timeout: int) -> dict:
         LOGGER.exception("command failed to start cwd=%s cmd=%s", cwd, cmd)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    stdout, stdout_truncated = _clip_text(result.stdout, MAX_OUTPUT_CHARS)
-    stderr, stderr_truncated = _clip_text(result.stderr, MAX_OUTPUT_CHARS)
+    stdout, stdout_truncated = clip_text(result.stdout, MAX_OUTPUT_CHARS)
+    stderr, stderr_truncated = clip_text(result.stderr, MAX_OUTPUT_CHARS)
     if stdout_truncated or stderr_truncated:
         LOGGER.warning(
             "command output truncated cmd=%s stdout_truncated=%s stderr_truncated=%s max_output_chars=%s",
@@ -879,7 +707,7 @@ async def list_projects(
     ORDER BY last_updated_at DESC
     LIMIT ?
     """
-    state_db, rows = _query_state_db(sql, (limit,))
+    state_db, rows = query_state_db(sql, (limit,))
     data = []
     for row in rows:
         cwd = row["cwd"]
@@ -923,7 +751,7 @@ async def list_threads(
         args.append(cwd)
     sql_base += " ORDER BY updated_at DESC LIMIT ?"
     args.append(limit)
-    state_db, rows = _query_state_db(sql_base, tuple(args))
+    state_db, rows = query_state_db(sql_base, tuple(args))
     data = []
     for row in rows:
         thread_cwd = row["cwd"]
@@ -931,15 +759,15 @@ async def list_threads(
             continue
         title = row["title"] or ""
         first_msg = row["first_user_message"] or ""
-        preview = _short_text(title if title else first_msg, 220)
-        display_name = _thread_display_name(thread_cwd, title, first_msg, row["id"])
+        preview = short_text(title if title else first_msg, 220)
+        display_name = thread_display_name(thread_cwd, title, first_msg, row["id"])
         data.append(
             {
                 "thread_id": row["id"],
                 "short_thread_id": str(row["id"])[:8],
                 "project_name": Path(thread_cwd).name if thread_cwd else None,
                 "title": title,
-                "first_user_message": _short_text(first_msg, 220),
+                "first_user_message": short_text(first_msg, 220),
                 "preview": preview,
                 "display_name": display_name,
                 "cwd": thread_cwd,
@@ -970,14 +798,14 @@ async def get_thread(thread_id: str) -> dict:
     WHERE id = ?
     LIMIT 1
     """
-    state_db, rows = _query_state_db(sql, (thread_id,))
+    state_db, rows = query_state_db(sql, (thread_id,))
     if not rows:
         raise HTTPException(status_code=404, detail="Thread not found")
     row = rows[0]
     title = row["title"] or ""
     first_msg = row["first_user_message"] or ""
-    preview = _short_text(title if title else first_msg, 400)
-    display_name = _thread_display_name(row["cwd"], title, first_msg, row["id"])
+    preview = short_text(title if title else first_msg, 400)
+    display_name = thread_display_name(row["cwd"], title, first_msg, row["id"])
     return {
         "state_db": str(state_db),
         "thread": {
@@ -985,7 +813,7 @@ async def get_thread(thread_id: str) -> dict:
             "short_thread_id": str(row["id"])[:8],
             "project_name": Path(row["cwd"]).name if row["cwd"] else None,
             "title": title,
-            "first_user_message": _short_text(first_msg, 400),
+            "first_user_message": short_text(first_msg, 400),
             "preview": preview,
             "display_name": display_name,
             "cwd": row["cwd"],
@@ -1010,7 +838,7 @@ async def debug_logs(lines: int = Query(default=200, ge=1, le=5000)) -> dict:
     return {
         "status": "ok",
         "log_file": str(log_path),
-        "lines": _tail_file(log_path, lines),
+        "lines": tail_file(log_path, lines),
     }
 
 
@@ -1089,7 +917,7 @@ async def post_codex(payload: CodexRequest) -> dict:
                 "status": "in_progress",
                 "message": "Codex is still working. Continue polling job status.",
                 "job_id": job_id,
-                "job": _format_job_view(job, include_result=False),
+                "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
             }
         # Completed within wait window: return final result/error in sync response.
         if job["status"] == "completed":
@@ -1100,7 +928,7 @@ async def post_codex(payload: CodexRequest) -> dict:
                 detail={
                     "message": "Codex job failed",
                     "job_id": job_id,
-                    "job": _format_job_view(job, include_result=False),
+                    "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
                 },
             )
     return await _execute_codex(payload)
@@ -1142,7 +970,7 @@ async def _run_job(job_id: str) -> None:
     notify_event: asyncio.Event = job["notify_event"]
 
     def _notify_job_update(method: str | None = None, wake_poll: bool = False) -> None:
-        now = _job_now()
+        now = job_now()
         job["updated_at"] = now
         if method:
             job["last_event_method"] = method
@@ -1172,7 +1000,7 @@ async def _run_job(job_id: str) -> None:
                 if isinstance(text, str):
                     job["last_update_text"] = text[-1000:]
         m = method if isinstance(method, str) else None
-        _notify_job_update(m, wake_poll=_is_significant_ws_event(m, msg))
+        _notify_job_update(m, wake_poll=is_significant_ws_event(m, msg))
 
     async def _on_server_request(req: dict) -> dict:
         request_id = req["id"]
@@ -1184,7 +1012,7 @@ async def _run_job(job_id: str) -> None:
             "method": method,
             "request_type": meta["request_type"],
             "summary": meta["summary"],
-            "created_at": _to_iso(_job_now()),
+            "created_at": _to_iso(job_now()),
             "params": params,
             "options": ["approve_once", "approve_all_similar", "deny", "guidance"],
         }
@@ -1197,7 +1025,7 @@ async def _run_job(job_id: str) -> None:
                     {
                         "request_id": request_id,
                         "decision": "approve_all_similar(auto)",
-                        "at": _to_iso(_job_now()),
+                        "at": _to_iso(job_now()),
                     }
                 )
                 _notify_job_update("job/approval_auto_applied", wake_poll=True)
@@ -1222,7 +1050,7 @@ async def _run_job(job_id: str) -> None:
             {
                 "request_id": request_id,
                 "decision": decision.get("decision"),
-                "at": _to_iso(_job_now()),
+                "at": _to_iso(job_now()),
             }
         )
         if decision.get("decision") == "approve_all_similar":
@@ -1230,7 +1058,7 @@ async def _run_job(job_id: str) -> None:
                 {
                     "key": policy_key,
                     "source_request_id": request_id,
-                    "created_at": _to_iso(_job_now()),
+                    "created_at": _to_iso(job_now()),
                     "scope_hint": decision.get("scope_hint"),
                 }
             )
@@ -1238,7 +1066,7 @@ async def _run_job(job_id: str) -> None:
         if decision.get("decision") == "guidance":
             guidance_text = (decision.get("guidance_text") or "").strip()
             if guidance_text:
-                job["last_update_text"] = _short_text(
+                job["last_update_text"] = short_text(
                     f"Operator guidance received: {guidance_text}", 1000
                 )
             _notify_job_update("job/approval_guidance", wake_poll=True)
@@ -1255,7 +1083,7 @@ async def _run_job(job_id: str) -> None:
         return {"decision": "decline"}
 
     job["status"] = "running"
-    job["started_at"] = _job_now()
+    job["started_at"] = job_now()
     job["updated_at"] = job["started_at"]
     _notify_job_update("job/running", wake_poll=True)
     try:
@@ -1278,7 +1106,7 @@ async def _run_job(job_id: str) -> None:
         job["status"] = "failed"
         job["error"] = {"status_code": 500, "detail": str(exc)}
     finally:
-        ts = _job_now()
+        ts = job_now()
         if job["status"] == "failed" and job.get("latest_diff_text"):
             job["diagnostic_diff_available"] = True
             job["diff_hint"] = "diagnostic diff available"
@@ -1290,13 +1118,13 @@ async def _run_job(job_id: str) -> None:
         done_event: asyncio.Event = job["done_event"]
         if not done_event.is_set():
             done_event.set()
-        _prune_jobs()
+        prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
 
 
 def _create_job(payload: CodexRequest) -> dict:
-    _prune_jobs()
-    job_id = f"job_{_job_now()}_{next(JOB_COUNTER)}"
-    ts = _job_now()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
+    job_id = f"job_{job_now()}_{next(JOB_COUNTER)}"
+    ts = job_now()
     job = {
         "job_id": job_id,
         "status": "queued",
@@ -1337,12 +1165,12 @@ def _create_job(payload: CodexRequest) -> dict:
 @app.post("/codex/jobs")
 async def create_codex_job(request: CodexJobRequest) -> dict:
     job = _create_job(request.payload)
-    return _format_job_view(job, include_result=False)
+    return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
 
 
 @app.post("/codex/jobs/{job_id}/approval")
 async def post_codex_job_approval(job_id: str, payload: CodexJobApprovalRequest) -> dict:
-    _prune_jobs()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1363,17 +1191,17 @@ async def post_codex_job_approval(job_id: str, payload: CodexJobApprovalRequest)
     }
     return {
         "status": "ok",
-        "job": _format_job_view(job, include_result=False),
+        "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
     }
 
 
 @app.get("/codex/jobs/{job_id}")
 async def get_codex_job(job_id: str) -> dict:
-    _prune_jobs()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    now = _job_now()
+    now = job_now()
     if job["status"] in {"queued", "running"}:
         next_poll_after = int(job.get("next_poll_after", 0) or 0)
         if JOB_LONG_POLL_ENABLED and next_poll_after > now:
@@ -1389,22 +1217,22 @@ async def get_codex_job(job_id: str) -> dict:
                         notify_event.clear()
                 else:
                     await asyncio.sleep(wait_seconds)
-                _prune_jobs()
+                prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
                 refreshed = JOBS.get(job_id)
                 if not refreshed:
                     raise HTTPException(status_code=404, detail="Job not found")
                 job = refreshed
-                now = _job_now()
+                now = job_now()
                 next_poll_after = int(job.get("next_poll_after", 0) or 0)
         if next_poll_after <= now:
             job["next_poll_after"] = now + JOB_POLL_AFTER_SECONDS
             job["updated_at"] = now
-    return _format_job_view(job, include_result=False)
+    return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
 
 
 @app.get("/codex/jobs/{job_id}/result")
 async def get_codex_job_result(job_id: str) -> dict:
-    _prune_jobs()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1413,7 +1241,7 @@ async def get_codex_job_result(job_id: str) -> dict:
             status_code=409,
             detail={
                 "message": "Job is not finished yet",
-                "job": _format_job_view(job, include_result=False),
+                "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
             },
         )
     if job["status"] == "failed":
@@ -1421,10 +1249,10 @@ async def get_codex_job_result(job_id: str) -> dict:
             status_code=502,
             detail={
                 "message": "Job failed",
-                "job": _format_job_view(job, include_result=False),
+                "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
             },
         )
-    return _format_job_view(job, include_result=True)
+    return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=True)
 
 
 @app.get("/codex/jobs/{job_id}/diff/live")
@@ -1433,7 +1261,7 @@ async def get_codex_job_diff_live(
     since_version: int = Query(default=0, ge=0),
     max_chars: int = Query(default=200000, ge=1000, le=2000000),
 ) -> dict:
-    _prune_jobs()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1475,7 +1303,7 @@ async def get_codex_job_diff_final(
     view: str = Query(default="raw", pattern="^(raw|split)$"),
     max_chars: int = Query(default=200000, ge=1000, le=2000000),
 ) -> dict:
-    _prune_jobs()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1487,7 +1315,7 @@ async def get_codex_job_diff_final(
             status_code=409,
             detail={
                 "message": "Final diff is not ready",
-                "job": _format_job_view(job, include_result=False),
+                "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
             },
         )
 
@@ -1507,7 +1335,7 @@ async def get_codex_job_diff_final(
             "has_diff": True,
             "view": "split",
             "mode": "diagnostic" if diagnostic_ready and not final_ready else "final",
-            "files": _parse_unified_diff(raw),
+            "files": parse_unified_diff(raw),
         }
 
     return {
@@ -1535,7 +1363,7 @@ async def get_codex_job_debug_trace(
     job_id: str,
     limit: int = Query(default=200, ge=1, le=2000),
 ) -> dict:
-    _prune_jobs()
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
