@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from cgw.auth import extract_api_key_from_request, token_fingerprint
+from cgw.config import GatewayConfig
 from cgw.jobs import format_job_view, is_significant_ws_event, job_now, parse_unified_diff, prune_jobs
 from cgw.models import CodexJobApprovalRequest, CodexJobRequest, CodexRequest, TaskRequest
 from cgw.state_db import query_state_db, thread_display_name
@@ -34,36 +35,37 @@ app = FastAPI(title="Codex Gateway", version="1.0.0")
 LOGGER = logging.getLogger("codex_gateway")
 
 # Mutable runtime config, initialized from env and overridden by CLI args.
-REPO = Path(os.environ.get("REPO", os.getcwd())).resolve()
-CODEX_TIMEOUT_SECONDS = int(os.environ.get("CODEX_TIMEOUT_SECONDS", "120"))
-APP_SERVER_URL = os.environ.get("APP_SERVER_URL", "ws://127.0.0.1:4500")
-APP_SERVER_BEARER_TOKEN = os.environ.get("APP_SERVER_BEARER_TOKEN")
-APP_SERVER_TIMEOUT_SECONDS = int(os.environ.get("APP_SERVER_TIMEOUT_SECONDS", "180"))
-GATEWAY_API_KEY = os.environ.get("CODEX_GATEWAY_API_KEY", "").strip()
-GATEWAY_API_KEY_HEADER = os.environ.get("GATEWAY_API_KEY_HEADER", "x-api-key").strip().lower()
-AUTH_DISABLED = os.environ.get("GATEWAY_DISABLE_AUTH", "0") == "1"
-DEBUG_MODE = os.environ.get("GATEWAY_DEBUG", "0") == "1"
-LOG_LEVEL = os.environ.get("GATEWAY_LOG_LEVEL", "INFO").upper()
-LOG_FILE = os.environ.get("GATEWAY_LOG_FILE", "").strip()
-LOG_REQUESTS = os.environ.get("GATEWAY_LOG_REQUESTS", "1") == "1"
-MAX_OUTPUT_CHARS = int(os.environ.get("GATEWAY_MAX_OUTPUT_CHARS", "60000"))
+_CONFIG = GatewayConfig.from_env()
+REPO = _CONFIG.repo
+CODEX_TIMEOUT_SECONDS = _CONFIG.codex_timeout_seconds
+APP_SERVER_URL = _CONFIG.app_server_url
+APP_SERVER_BEARER_TOKEN = _CONFIG.app_server_bearer_token
+APP_SERVER_TIMEOUT_SECONDS = _CONFIG.app_server_timeout_seconds
+GATEWAY_API_KEY = _CONFIG.gateway_api_key
+GATEWAY_API_KEY_HEADER = _CONFIG.gateway_api_key_header
+AUTH_DISABLED = _CONFIG.auth_disabled
+DEBUG_MODE = _CONFIG.debug_mode
+LOG_LEVEL = _CONFIG.log_level
+LOG_FILE = _CONFIG.log_file
+LOG_REQUESTS = _CONFIG.log_requests
+MAX_OUTPUT_CHARS = _CONFIG.max_output_chars
 MANAGED_APP_SERVER_PROCESS: subprocess.Popen[str] | None = None
 MANAGED_APP_SERVER_LISTEN_URL: str | None = None
 MANAGED_APP_SERVER_STARTED_BY_GATEWAY = False
-JOB_POLL_AFTER_SECONDS = int(os.environ.get("GATEWAY_JOB_POLL_AFTER_SECONDS", "15"))
-JOB_TTL_SECONDS = int(os.environ.get("GATEWAY_JOB_TTL_SECONDS", "7200"))
-JOB_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_MAX_ITEMS", "500"))
-JOB_LONG_POLL_ENABLED = os.environ.get("GATEWAY_JOB_LONG_POLL_ENABLED", "1") == "1"
-JOB_LONG_POLL_MAX_SECONDS = int(os.environ.get("GATEWAY_JOB_LONG_POLL_MAX_SECONDS", "20"))
-CODEX_SYNC_MAX_WAIT_SECONDS = int(os.environ.get("GATEWAY_CODEX_SYNC_MAX_WAIT_SECONDS", "20"))
-JOB_DEBUG_TRACE_ENABLED = os.environ.get("GATEWAY_JOB_DEBUG_TRACE_ENABLED", "1") == "1"
-JOB_DEBUG_TRACE_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_DEBUG_TRACE_MAX_ITEMS", "400"))
-APPROVAL_POLL_INTERVAL_SECONDS = float(os.environ.get("GATEWAY_APPROVAL_POLL_INTERVAL_SECONDS", "0.25"))
+JOB_POLL_AFTER_SECONDS = _CONFIG.job_poll_after_seconds
+JOB_TTL_SECONDS = _CONFIG.job_ttl_seconds
+JOB_MAX_ITEMS = _CONFIG.job_max_items
+JOB_LONG_POLL_ENABLED = _CONFIG.job_long_poll_enabled
+JOB_LONG_POLL_MAX_SECONDS = _CONFIG.job_long_poll_max_seconds
+CODEX_SYNC_MAX_WAIT_SECONDS = _CONFIG.codex_sync_max_wait_seconds
+JOB_DEBUG_TRACE_ENABLED = _CONFIG.job_debug_trace_enabled
+JOB_DEBUG_TRACE_MAX_ITEMS = _CONFIG.job_debug_trace_max_items
+APPROVAL_POLL_INTERVAL_SECONDS = _CONFIG.approval_poll_interval_seconds
 JOBS: dict[str, dict] = {}
 JOB_COUNTER = itertools.count(1)
-PUBLIC_SCHEMA_ENABLED = os.environ.get("GATEWAY_PUBLIC_SCHEMA", "0") == "1"
-SCHEMA_IMPORT_KEY = os.environ.get("GATEWAY_SCHEMA_IMPORT_KEY", "").strip()
-SCHEMA_IMPORT_KEY_PARAM = os.environ.get("GATEWAY_SCHEMA_IMPORT_KEY_PARAM", "schema_key").strip()
+PUBLIC_SCHEMA_ENABLED = _CONFIG.public_schema_enabled
+SCHEMA_IMPORT_KEY = _CONFIG.schema_import_key
+SCHEMA_IMPORT_KEY_PARAM = _CONFIG.schema_import_key_param
 
 
 def _configure_logging() -> None:
