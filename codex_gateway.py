@@ -29,7 +29,7 @@ from cgw.approval import map_approval_decision
 from cgw.config import GatewayConfig
 from cgw.jobs import format_job_view, is_significant_ws_event, job_now, parse_unified_diff, prune_jobs
 from cgw.models import CodexJobApprovalRequest, CodexJobRequest, CodexRequest, TaskRequest
-from cgw.protocol_registry import ProtocolRegistryError, build_registry_with_optional_generation
+from cgw.protocol_registry import ProtocolRegistryError, build_registry_with_generation
 from cgw.state_db import query_state_db, thread_display_name
 from cgw.text_utils import clip_text, short_text, tail_file
 
@@ -69,7 +69,6 @@ JOB_COUNTER = itertools.count(1)
 PUBLIC_SCHEMA_ENABLED = _CONFIG.public_schema_enabled
 SCHEMA_IMPORT_KEY = _CONFIG.schema_import_key
 SCHEMA_IMPORT_KEY_PARAM = _CONFIG.schema_import_key_param
-PROTOCOL_SCHEMA_GENERATE_ENABLED = os.environ.get("GATEWAY_PROTOCOL_SCHEMA_GENERATE", "0") == "1"
 PROTOCOL_SCHEMA_CODEX_BIN = os.environ.get("GATEWAY_PROTOCOL_SCHEMA_CODEX_BIN", "codex").strip()
 PROTOCOL_REGISTRY: dict = {
     "loaded": False,
@@ -398,13 +397,10 @@ def _schema_import_urls(port: int) -> tuple[str, str | None]:
 
 def _load_protocol_registry() -> None:
     global PROTOCOL_REGISTRY
-    protocol_dir = Path(__file__).resolve().parent / "protocol"
     try:
-        PROTOCOL_REGISTRY = build_registry_with_optional_generation(
+        PROTOCOL_REGISTRY = build_registry_with_generation(
             repo_root=REPO,
-            protocol_fallback_dir=protocol_dir,
             codex_bin=PROTOCOL_SCHEMA_CODEX_BIN,
-            generate_enabled=PROTOCOL_SCHEMA_GENERATE_ENABLED,
         )
         LOGGER.info(
             "protocol registry loaded source=%s schema_count=%s registry_hash=%s",

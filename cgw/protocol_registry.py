@@ -67,35 +67,30 @@ def build_registry_from_dir(root: Path) -> dict[str, Any]:
     }
 
 
-def build_registry_with_optional_generation(
+def build_registry_with_generation(
     *,
     repo_root: Path,
-    protocol_fallback_dir: Path,
     codex_bin: str = "codex",
-    generate_enabled: bool = False,
 ) -> dict[str, Any]:
     errors: list[str] = []
-    if generate_enabled:
-        tmp_root = Path(os.environ.get("TMPDIR", "/tmp")).resolve()
-        tmp_dir = tmp_root / f"codex-schemas-{os.getpid()}-{int(time.time())}"
-        try:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [codex_bin, "app-server", "generate-json-schema", "--out", str(tmp_dir)]
-            proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, timeout=120)
-            if proc.returncode != 0:
-                errors.append(f"schema generation failed exit={proc.returncode}: {proc.stderr.strip()}")
-            else:
-                reg = build_registry_from_dir(tmp_dir)
-                reg["source"] = "generated"
-                reg["errors"] = errors
-                return reg
-        except Exception as exc:
-            errors.append(f"schema generation exception: {exc}")
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    reg = build_registry_from_dir(protocol_fallback_dir)
-    reg["source"] = "fallback"
-    reg["errors"] = errors
-    return reg
-
+    tmp_root = Path(os.environ.get("TMPDIR", "/tmp")).resolve()
+    tmp_dir = tmp_root / f"codex-schemas-{os.getpid()}-{int(time.time())}"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [codex_bin, "app-server", "generate-json-schema", "--out", str(tmp_dir)]
+        proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise ProtocolRegistryError(
+                f"schema generation failed exit={proc.returncode}: {proc.stderr.strip()}"
+            )
+        reg = build_registry_from_dir(tmp_dir)
+        reg["source"] = "generated"
+        reg["errors"] = errors
+        return reg
+    except ProtocolRegistryError:
+        raise
+    except Exception as exc:
+        errors.append(f"schema generation exception: {exc}")
+        raise ProtocolRegistryError("; ".join(errors)) from exc
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

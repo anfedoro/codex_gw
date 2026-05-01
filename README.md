@@ -159,11 +159,6 @@ The project exposes the `codex-gateway` script through `[project.scripts]` in `p
 
 ### Protocol schema registry
 
-- `GATEWAY_PROTOCOL_SCHEMA_GENERATE`
-  - Purpose: try runtime generation of fresh protocol schemas before fallback load.
-  - Values: `1` enable, `0` disable.
-  - Default: `0`.
-
 - `GATEWAY_PROTOCOL_SCHEMA_CODEX_BIN`
   - Purpose: Codex binary used for protocol schema generation.
   - Default: `codex`.
@@ -246,7 +241,7 @@ The gateway exposes an in-memory protocol schema registry:
   - Returns full JSON schema by id.
 
 Registry lifecycle:
-- startup loads schemas into memory (generated source when enabled, fallback from `protocol/` otherwise),
+- startup generates schemas via Codex into a temporary directory, loads them into memory, then removes temporary files,
 - temporary generated schema files are deleted after loading,
 - requests are served from memory only.
 
