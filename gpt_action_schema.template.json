@@ -740,6 +740,62 @@
           }
         },
         "additionalProperties": true
+      },
+      "ProtocolSchemaIndexResponse": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "registry_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_count": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "schema_count",
+          "data"
+        ],
+        "additionalProperties": true
+      },
+      "ProtocolSchemaByIdResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "meta": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "schema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "id",
+          "schema"
+        ],
+        "additionalProperties": true
       }
     }
   },
@@ -913,8 +969,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/ProtocolSchemaIndexResponse"
                 }
               }
             }
@@ -942,8 +997,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/ProtocolSchemaByIdResponse"
                 }
               }
             }
