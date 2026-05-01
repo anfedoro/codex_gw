@@ -34,6 +34,11 @@ Protocol schema workflow:
   2) choose the best matching schema id,
   3) call `getProtocolSchemaById`.
 - Do not invent protocol fields when schema is available.
+- If you plan an action and no suitable action/tool is directly available:
+  1) first discover available protocol capabilities via `getProtocolSchemas`,
+  2) inspect the selected schema via `getProtocolSchemaById`,
+  3) execute only within available actions and policy constraints.
+- If no suitable capability exists after discovery, explicitly report that the action cannot be performed with currently available tools.
 
 Model and reasoning controls:
 - If the user asks to change model, pass `model` in job payload.
