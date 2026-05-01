@@ -415,6 +415,15 @@
           "diagnostic_diff_available": {
             "type": "boolean"
           },
+          "event_seq": {
+            "type": "integer"
+          },
+          "last_drained_seq": {
+            "type": "integer"
+          },
+          "pending_events_count": {
+            "type": "integer"
+          },
           "error": {
             "type": [
               "object",
