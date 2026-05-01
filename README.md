@@ -263,6 +263,17 @@ To avoid HTTP/proxy timeouts for long Codex operations, use async job endpoints:
    - If polled too early, gateway can hold the request (long-poll) and respond later to reduce request spam.
    - Long-poll is event-driven only for significant updates (completed assistant message, turn completion, failures).
    - High-frequency WS noise (deltas/started/token-usage updates) does not wake polling early.
+
+Event buffering and thread correlation:
+- Gateway keeps buffered per-job events in memory (sequence-based) so updates are not tied to an active HTTP poll call.
+- Read buffered deltas via:
+  - `GET /codex/jobs/{job_id}/events?since_seq=<n>`
+- Job status includes:
+  - `event_seq`
+  - `last_drained_seq`
+  - `pending_events_count`
+- If a new `resume` action for the same `thread_id` is requested while pending buffered events exist, gateway returns `409` and asks to drain events first.
+- Thread isolation is strict (`thread_id -> jobs -> events`); jobs/events are not mixed across threads.
 4. For diff orchestration:
    - If `diff_mode=live`: call `GET /codex/jobs/{job_id}/diff/live?since_version=<n>` when `diff_live_version` increases.
    - If `diff_mode=final_only`: wait for `diff_final_available=true`, then call `GET /codex/jobs/{job_id}/diff/final`.

@@ -40,6 +40,12 @@ def format_job_view(
         "diff_final_available": bool(job.get("diff_final_available", False)),
         "diff_hint": job.get("diff_hint"),
         "diagnostic_diff_available": bool(job.get("diagnostic_diff_available", False)),
+        "event_seq": int(job.get("event_seq", 0) or 0),
+        "last_drained_seq": int(job.get("last_drained_seq", 0) or 0),
+        "pending_events_count": max(
+            0,
+            int(job.get("event_seq", 0) or 0) - int(job.get("last_drained_seq", 0) or 0),
+        ),
         "error": job.get("error"),
     }
     if include_result:
@@ -109,4 +115,3 @@ def parse_unified_diff(raw: str) -> list[dict]:
             txt = line[1:] if line.startswith(" ") else line
             current_hunk["context_lines"].append(txt)
     return files
-

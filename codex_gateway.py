@@ -64,6 +64,7 @@ CODEX_SYNC_MAX_WAIT_SECONDS = _CONFIG.codex_sync_max_wait_seconds
 JOB_DEBUG_TRACE_ENABLED = _CONFIG.job_debug_trace_enabled
 JOB_DEBUG_TRACE_MAX_ITEMS = _CONFIG.job_debug_trace_max_items
 APPROVAL_POLL_INTERVAL_SECONDS = _CONFIG.approval_poll_interval_seconds
+JOB_EVENT_BUFFER_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_EVENT_BUFFER_MAX_ITEMS", "400"))
 JOBS: dict[str, dict] = {}
 JOB_COUNTER = itertools.count(1)
 PUBLIC_SCHEMA_ENABLED = _CONFIG.public_schema_enabled
@@ -313,6 +314,82 @@ def _append_job_debug_trace(job: dict, msg: dict) -> None:
     trace.append(row)
     if len(trace) > JOB_DEBUG_TRACE_MAX_ITEMS:
         del trace[: len(trace) - JOB_DEBUG_TRACE_MAX_ITEMS]
+
+
+def _append_job_event(job: dict, msg: dict) -> None:
+    seq = int(job.get("event_seq", 0) or 0) + 1
+    job["event_seq"] = seq
+    events = job.get("events")
+    if events is None:
+        return
+    events.append(
+        {
+            "seq": seq,
+            "ts": _to_iso(job_now()),
+            "method": msg.get("method") if isinstance(msg.get("method"), str) else None,
+            "payload": msg,
+        }
+    )
+    if len(events) > JOB_EVENT_BUFFER_MAX_ITEMS:
+        del events[: len(events) - JOB_EVENT_BUFFER_MAX_ITEMS]
+        # Keep drained pointer inside retained window.
+        if events:
+            first_seq = int(events[0].get("seq", 1) or 1)
+            if int(job.get("last_drained_seq", 0) or 0) < first_seq - 1:
+                job["last_drained_seq"] = first_seq - 1
+
+
+def _job_pending_events_count(job: dict) -> int:
+    return max(0, int(job.get("event_seq", 0) or 0) - int(job.get("last_drained_seq", 0) or 0))
+
+
+def _thread_pending_jobs(thread_id: str, *, exclude_job_id: str | None = None) -> list[dict]:
+    out: list[dict] = []
+    for jid, job in JOBS.items():
+        if exclude_job_id and jid == exclude_job_id:
+            continue
+        if str(job.get("thread_id") or "") != str(thread_id):
+            continue
+        pending = _job_pending_events_count(job)
+        if pending <= 0:
+            continue
+        out.append(
+            {
+                "job_id": jid,
+                "status": job.get("status"),
+                "pending_events_count": pending,
+                "event_seq": int(job.get("event_seq", 0) or 0),
+                "last_drained_seq": int(job.get("last_drained_seq", 0) or 0),
+                "next_action": f"/codex/jobs/{jid}/events?since_seq={int(job.get('last_drained_seq', 0) or 0)}",
+            }
+        )
+    return out
+
+
+def _raise_pending_events_conflict(thread_id: str, pending_jobs: list[dict]) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": "Pending events exist for this thread. Drain events first.",
+            "thread_id": thread_id,
+            "pending_jobs": pending_jobs,
+        },
+    )
+
+
+def _assert_job_thread(job: dict, thread_id: str | None) -> None:
+    if not thread_id:
+        return
+    actual = job.get("thread_id")
+    if not actual or str(actual) != str(thread_id):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Thread mismatch for this job",
+                "expected_thread_id": thread_id,
+                "actual_thread_id": actual,
+            },
+        )
 
 
 def _resolve_repo_path(path: str) -> Path:
@@ -1034,6 +1111,10 @@ async def post_codex(payload: CodexRequest) -> dict:
     # Fail fast for invalid cwd in app_server_ws mode.
     if payload.backend == "app_server_ws":
         _validate_app_server_cwd(payload.cwd)
+        if payload.kind == "resume" and payload.session_id:
+            pending_jobs = _thread_pending_jobs(payload.session_id)
+            if pending_jobs:
+                _raise_pending_events_conflict(payload.session_id, pending_jobs)
     # Keep sync API for compatibility, but avoid proxy timeouts:
     # run as background job and wait a short window for completion.
     if payload.backend == "app_server_ws":
@@ -1110,8 +1191,14 @@ async def _run_job(job_id: str) -> None:
         loop.call_soon_threadsafe(notify_event.set)
 
     def _on_update(msg: dict) -> None:
+        _append_job_event(job, msg)
         _append_job_debug_trace(job, msg)
         method = msg.get("method")
+        if method == "thread/started":
+            thread = msg.get("params", {}).get("thread", {})
+            thread_id = thread.get("id")
+            if isinstance(thread_id, str) and thread_id:
+                job["thread_id"] = thread_id
         diff_text = _extract_best_diff_text(msg)
         if diff_text:
             _register_diff_update(job, method if isinstance(method, str) else None, diff_text)
@@ -1291,7 +1378,7 @@ def _create_job(payload: CodexRequest) -> dict:
         "started_at": None,
         "updated_at": ts,
         "completed_at": None,
-        "thread_id": None,
+        "thread_id": payload.session_id if payload.kind == "resume" else None,
         "next_poll_after": ts,
         "last_event_method": "job/queued",
         "last_update_text": None,
@@ -1309,6 +1396,9 @@ def _create_job(payload: CodexRequest) -> dict:
         "latest_diff_text": None,
         "final_diff_text": None,
         "diff_live_updates": [],
+        "events": [],
+        "event_seq": 0,
+        "last_drained_seq": 0,
         "notify_event": asyncio.Event(),
         "done_event": asyncio.Event(),
         "error": None,
@@ -1323,16 +1413,26 @@ def _create_job(payload: CodexRequest) -> dict:
 
 @app.post("/codex/jobs")
 async def create_codex_job(request: CodexJobRequest) -> dict:
+    payload = request.payload
+    if payload.backend == "app_server_ws" and payload.kind == "resume" and payload.session_id:
+        pending_jobs = _thread_pending_jobs(payload.session_id)
+        if pending_jobs:
+            _raise_pending_events_conflict(payload.session_id, pending_jobs)
     job = _create_job(request.payload)
     return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
 
 
 @app.post("/codex/jobs/{job_id}/approval")
-async def post_codex_job_approval(job_id: str, payload: CodexJobApprovalRequest) -> dict:
+async def post_codex_job_approval(
+    job_id: str,
+    payload: CodexJobApprovalRequest,
+    thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
+) -> dict:
     prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_thread(job, thread_id)
     if not job.get("approval_required") or not job.get("approval_request"):
         raise HTTPException(status_code=409, detail="No pending approval for this job")
 
@@ -1363,11 +1463,15 @@ async def post_codex_job_approval(job_id: str, payload: CodexJobApprovalRequest)
 
 
 @app.get("/codex/jobs/{job_id}")
-async def get_codex_job(job_id: str) -> dict:
+async def get_codex_job(
+    job_id: str,
+    thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
+) -> dict:
     prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_thread(job, thread_id)
     now = job_now()
     if job["status"] in {"queued", "running"}:
         next_poll_after = int(job.get("next_poll_after", 0) or 0)
@@ -1398,11 +1502,15 @@ async def get_codex_job(job_id: str) -> dict:
 
 
 @app.get("/codex/jobs/{job_id}/result")
-async def get_codex_job_result(job_id: str) -> dict:
+async def get_codex_job_result(
+    job_id: str,
+    thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
+) -> dict:
     prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_thread(job, thread_id)
     if job["status"] in {"queued", "running"}:
         raise HTTPException(
             status_code=409,
@@ -1425,6 +1533,7 @@ async def get_codex_job_result(job_id: str) -> dict:
 @app.get("/codex/jobs/{job_id}/diff/live")
 async def get_codex_job_diff_live(
     job_id: str,
+    thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
     since_version: int = Query(default=0, ge=0),
     max_chars: int = Query(default=200000, ge=1000, le=2000000),
 ) -> dict:
@@ -1432,6 +1541,7 @@ async def get_codex_job_diff_live(
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_thread(job, thread_id)
 
     if job.get("diff_mode") != "live":
         return {
@@ -1467,6 +1577,7 @@ async def get_codex_job_diff_live(
 @app.get("/codex/jobs/{job_id}/diff/final")
 async def get_codex_job_diff_final(
     job_id: str,
+    thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
     view: str = Query(default="raw", pattern="^(raw|split)$"),
     max_chars: int = Query(default=200000, ge=1000, le=2000000),
 ) -> dict:
@@ -1474,6 +1585,7 @@ async def get_codex_job_diff_final(
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_thread(job, thread_id)
 
     final_ready = bool(job.get("diff_final_available", False))
     diagnostic_ready = bool(job.get("diagnostic_diff_available", False))
@@ -1512,6 +1624,54 @@ async def get_codex_job_diff_final(
         "view": "raw",
         "mode": "diagnostic" if diagnostic_ready and not final_ready else "final",
         "diff": raw,
+    }
+
+
+@app.get("/codex/jobs/{job_id}/events")
+async def get_codex_job_events(
+    job_id: str,
+    thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
+    since_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=5000),
+    max_chars: int = Query(default=200000, ge=1000, le=2000000),
+) -> dict:
+    prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_thread(job, thread_id)
+
+    events: list[dict] = []
+    for row in job.get("events", []):
+        seq = int(row.get("seq", 0) or 0)
+        if seq <= since_seq:
+            continue
+        rendered = {
+            "seq": seq,
+            "ts": row.get("ts"),
+            "method": row.get("method"),
+            "payload": row.get("payload"),
+        }
+        if len(json.dumps(rendered, ensure_ascii=False)) > max_chars:
+            rendered["payload"] = {"truncated": True}
+        events.append(rendered)
+        if len(events) >= limit:
+            break
+
+    if events:
+        max_seq = max(int(e.get("seq", 0) or 0) for e in events)
+        if max_seq > int(job.get("last_drained_seq", 0) or 0):
+            job["last_drained_seq"] = max_seq
+
+    return {
+        "job_id": job_id,
+        "thread_id": job.get("thread_id"),
+        "status": job.get("status"),
+        "since_seq": since_seq,
+        "latest_seq": int(job.get("event_seq", 0) or 0),
+        "last_drained_seq": int(job.get("last_drained_seq", 0) or 0),
+        "pending_events_count": _job_pending_events_count(job),
+        "events": events,
     }
 
 
