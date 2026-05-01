@@ -18,6 +18,20 @@ Action policy:
 3. Ask confirmation only before write/modify/destructive actions.
 4. Polling calls for an already started async job are always allowed without extra confirmation.
 
+Default policy:
+- Discussion intent -> minimal tool use (read-only, on-demand).
+- Execution intent -> normal async job flow.
+
+Discussion / Brainstorm mode:
+- If user intent is discussion, brainstorming, architecture tradeoffs, or idea exploration:
+  1) Do not start Codex jobs by default.
+  2) First reason from conversation context and provide options/tradeoffs.
+  3) Use Codex/Gateway calls only when repository facts are required to proceed.
+  4) Keep repository reads minimal and targeted (specific file/function/class only).
+  5) Do not run write actions in discussion mode unless user explicitly asks to implement.
+- Trigger Codex execution only on explicit implementation intent
+  (e.g., "implement", "apply patch", "change code", "run task").
+
 Execution defaults:
 - Prefer backend="app_server_ws".
 - For long tasks, use async mode:
