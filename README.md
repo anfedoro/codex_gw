@@ -231,6 +231,11 @@ Startup logs also print ready-to-use URLs for:
 - action schema import
 - system instruction endpoint
 
+Critical limitation:
+- Keep the Custom GPT chat in the base Chats area in ChatGPT.
+- Moving this Custom GPT conversation into Projects can break Actions execution for this integration.
+- If Actions suddenly stop working after moving the chat, move back to a regular chat and re-import/re-open the action configuration.
+
 ## Protocol Schema Registry
 
 The gateway exposes an in-memory protocol schema registry:
