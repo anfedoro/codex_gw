@@ -28,7 +28,14 @@ from cgw.auth import extract_api_key_from_request, token_fingerprint
 from cgw.approval import map_approval_decision
 from cgw.config import GatewayConfig
 from cgw.jobs import format_job_view, is_significant_ws_event, job_now, parse_unified_diff, prune_jobs
-from cgw.models import CodexJobApprovalRequest, CodexJobRequest, CodexRequest, TaskRequest
+from cgw.models import (
+    CodexJobApprovalRequest,
+    CodexJobRequest,
+    CodexRequest,
+    ProjectCreateRequest,
+    TaskRequest,
+    ThreadCreateRequest,
+)
 from cgw.protocol_registry import ProtocolRegistryError, build_registry_with_generation
 from cgw.state_db import query_state_db, thread_display_name
 from cgw.text_utils import clip_text, short_text, tail_file
@@ -423,6 +430,39 @@ def _validate_app_server_cwd(cwd_value: str | None) -> Path | None:
     if not cwd.is_dir():
         raise HTTPException(status_code=400, detail=f"cwd is not a directory: {cwd}")
     return cwd
+
+
+def _resolve_project_cwd(cwd_value: str) -> Path:
+    if not isinstance(cwd_value, str) or not cwd_value.strip():
+        raise HTTPException(status_code=400, detail="cwd must be a non-empty string")
+    return Path(cwd_value).expanduser().resolve()
+
+
+def _project_stats(cwd: Path) -> tuple[int, str | None, str]:
+    sql = """
+    SELECT
+      COUNT(*) AS thread_count,
+      MAX(updated_at) AS last_updated_at
+    FROM threads
+    WHERE archived = 0
+      AND cwd = ?
+    """
+    state_db, rows = query_state_db(sql, (str(cwd),))
+    row = rows[0] if rows else {"thread_count": 0, "last_updated_at": None}
+    thread_count = int(row["thread_count"] or 0)
+    last_updated_at = _to_iso(row["last_updated_at"])
+    return thread_count, last_updated_at, str(state_db)
+
+
+def _project_item(cwd: Path, thread_count: int, last_updated_at: str | None) -> dict:
+    cwd_str = str(cwd)
+    return {
+        "project_id": cwd_str,
+        "cwd": cwd_str,
+        "name": cwd.name or cwd_str,
+        "thread_count": thread_count,
+        "last_updated_at": last_updated_at,
+    }
 
 
 def _gateway_base_url(request: Request) -> str:
@@ -1014,15 +1054,38 @@ async def list_projects(
         if existing_only and (not cwd or not Path(cwd).exists() or not Path(cwd).is_dir()):
             continue
         data.append(
-            {
-                "project_id": cwd,
-                "cwd": cwd,
-                "name": Path(cwd).name or cwd,
-                "thread_count": int(row["thread_count"] or 0),
-                "last_updated_at": _to_iso(row["last_updated_at"]),
-            }
+            _project_item(
+                Path(cwd),
+                thread_count=int(row["thread_count"] or 0),
+                last_updated_at=_to_iso(row["last_updated_at"]),
+            )
         )
     return {"state_db": str(state_db), "data": data}
+
+
+@app.post("/projects")
+async def create_project(payload: ProjectCreateRequest) -> dict:
+    cwd = _resolve_project_cwd(payload.cwd)
+    created = False
+    if cwd.exists():
+        if not cwd.is_dir():
+            raise HTTPException(status_code=400, detail=f"cwd exists and is not a directory: {cwd}")
+    else:
+        if not payload.create_if_missing:
+            raise HTTPException(status_code=404, detail=f"cwd does not exist: {cwd}")
+        try:
+            cwd.mkdir(parents=True, exist_ok=True)
+            created = True
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"failed to create cwd: {cwd}: {exc}") from exc
+
+    thread_count, last_updated_at, state_db = _project_stats(cwd)
+    return {
+        "status": "ok",
+        "created": created,
+        "state_db": state_db,
+        "project": _project_item(cwd, thread_count, last_updated_at),
+    }
 
 
 @app.get("/threads")
@@ -1079,6 +1142,42 @@ async def list_threads(
             }
         )
     return {"state_db": str(state_db), "data": data}
+
+
+@app.post("/threads")
+async def create_thread(payload: ThreadCreateRequest) -> dict:
+    req = CodexRequest(
+        backend="app_server_ws",
+        kind="new",
+        prompt=None,
+        cwd=payload.cwd,
+        model=payload.model,
+        reasoning_effort=payload.reasoning_effort,
+        sandbox=payload.sandbox,
+        approvals=payload.approvals,
+        search=False,
+        use_exec=False,
+        app_server_url=payload.app_server_url,
+        app_server_bearer_token=payload.app_server_bearer_token,
+        include_events=False,
+        max_events=0,
+        diff_mode="off",
+    )
+    result = await _execute_codex_with_updates(req, on_update=None, on_server_request=None)
+    thread = result.get("thread") if isinstance(result, dict) else None
+    if not isinstance(thread, dict):
+        raise HTTPException(status_code=502, detail="app-server did not return thread object")
+    thread_id = thread.get("id")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise HTTPException(status_code=502, detail="app-server did not return thread id")
+    return {
+        "status": "ok",
+        "interaction_mode": payload.interaction_mode,
+        "backend": result.get("backend"),
+        "app_server_url": result.get("app_server_url"),
+        "thread_id": thread_id,
+        "thread": thread,
+    }
 
 
 @app.get("/threads/{thread_id}")

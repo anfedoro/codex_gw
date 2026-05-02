@@ -730,6 +730,40 @@
         },
         "additionalProperties": true
       },
+      "ProjectCreateRequest": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "create_if_missing": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "cwd"
+        ],
+        "additionalProperties": false
+      },
+      "ProjectCreateResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "state_db": {
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectItem"
+          }
+        },
+        "additionalProperties": true
+      },
       "ThreadItem": {
         "type": "object",
         "properties": {
@@ -789,6 +823,83 @@
               "string",
               "null"
             ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "ThreadCreateRequest": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "sandbox": {
+            "type": "string",
+            "enum": [
+              "read-only",
+              "workspace-write",
+              "danger-full-access"
+            ]
+          },
+          "approvals": {
+            "type": "string"
+          },
+          "app_server_url": {
+            "type": "string"
+          },
+          "app_server_bearer_token": {
+            "type": "string"
+          },
+          "interaction_mode": {
+            "type": "string",
+            "enum": [
+              "execution",
+              "planning"
+            ],
+            "default": "execution"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ThreadCreateResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "interaction_mode": {
+            "type": "string"
+          },
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "app_server_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "thread": {
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "additionalProperties": true
@@ -898,6 +1009,177 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List available projects from state DB",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 200
+            }
+          },
+          {
+            "name": "existing_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Projects list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create or validate a project directory",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Project created or validated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCreateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads": {
+      "get": {
+        "operationId": "listThreads",
+        "summary": "List threads, optionally filtered by cwd",
+        "parameters": [
+          {
+            "name": "cwd",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 100
+            }
+          },
+          {
+            "name": "existing_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Threads list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createThread",
+        "summary": "Create a new thread context without running a turn",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Thread created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadCreateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/{thread_id}": {
+      "get": {
+        "operationId": "getThread",
+        "summary": "Get thread details by id",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Thread details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadByIdResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Thread not found"
           }
         }
       }

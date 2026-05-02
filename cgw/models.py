@@ -53,3 +53,18 @@ class CodexJobApprovalRequest(BaseModel):
     guidance_text: str | None = None
     scope_hint: str | None = None
 
+
+class ProjectCreateRequest(BaseModel):
+    cwd: str
+    create_if_missing: bool = True
+
+
+class ThreadCreateRequest(BaseModel):
+    cwd: str | None = None
+    model: str | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
+    sandbox: Literal["read-only", "workspace-write", "danger-full-access"] | None = None
+    approvals: str | None = None
+    app_server_url: str | None = None
+    app_server_bearer_token: str | None = None
+    interaction_mode: Literal["execution", "planning"] = "execution"

@@ -199,8 +199,13 @@ Structured lifecycle logs:
 - `gpt_system_instruction.template.txt`: system instruction template for the Custom GPT.
 - `GET /gpt-system-instruction.txt`: returns current system instruction text used for GPT setup/testing.
 
-The imported GPT OpenAPI is intentionally minimal (continuity-oriented):
+The imported GPT OpenAPI includes admin context actions plus execution job-flow:
 - `getGatewayHealth`
+- `listProjects`
+- `createProject`
+- `listThreads`
+- `getThread`
+- `createThread`
 - `createCodexJob`
 - `getCodexJob`
 - `getCodexJobEvents`
