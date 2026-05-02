@@ -203,10 +203,9 @@ The imported GPT OpenAPI is intentionally minimal (continuity-oriented):
 - `getGatewayHealth`
 - `createCodexJob`
 - `getCodexJob`
+- `getCodexJobEvents`
 - `postCodexJobApproval`
 - `getCodexJobResult`
-- `getProtocolSchemas`
-- `getProtocolSchemaById`
 
 ### Import from URL
 
@@ -294,6 +293,7 @@ Notes:
 - Polling endpoints are read-only and should not require repeated user confirmations in GPT flow after job creation.
 - `GET /codex/jobs/{job_id}` returns:
   - `200` with status and `retry_after_seconds` / `next_poll_after_at` hints.
+  - Includes `progress_summary.items[]` with filtered job milestones (`seq`, `kind`, `elapsed_sec`, `elapsed_label`, `text`).
   - Includes diff signals:
     - `diff_live_available`
     - `diff_live_version`

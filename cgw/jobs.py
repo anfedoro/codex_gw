@@ -46,6 +46,9 @@ def format_job_view(
             0,
             int(job.get("event_seq", 0) or 0) - int(job.get("last_drained_seq", 0) or 0),
         ),
+        "progress_summary": {
+            "items": list(job.get("progress_items", [])[-5:]),
+        },
         "error": job.get("error"),
     }
     if include_result:

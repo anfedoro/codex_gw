@@ -19,12 +19,22 @@ def test_format_job_view_basic_fields() -> None:
         "thread_id": "t1",
         "approval_policies": [],
         "diff_live_version": 0,
+        "progress_items": [
+            {
+                "seq": 1,
+                "kind": "job/running",
+                "elapsed_sec": 0,
+                "elapsed_label": "0s",
+                "text": "Job started.",
+            }
+        ],
     }
     view = format_job_view(job, poll_after_seconds=15, to_iso=_to_iso_stub)
     assert view["job_id"] == "job_1"
     assert view["thread_id"] == "t1"
     assert view["poll_after_seconds"] == 15
     assert view["created_at"] == "iso-100"
+    assert view["progress_summary"]["items"][0]["kind"] == "job/running"
 
 
 def test_prune_jobs_removes_old_completed() -> None:
@@ -59,4 +69,3 @@ def test_parse_unified_diff_minimal() -> None:
     assert files[0]["new_path"] == "b/a.txt"
     assert files[0]["hunks"][0]["old_lines"] == ["old"]
     assert files[0]["hunks"][0]["new_lines"] == ["new"]
-

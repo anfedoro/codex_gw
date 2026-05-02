@@ -424,6 +424,36 @@
           "pending_events_count": {
             "type": "integer"
           },
+          "progress_summary": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "seq": {
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "type": "string"
+                    },
+                    "elapsed_sec": {
+                      "type": "integer"
+                    },
+                    "elapsed_label": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          },
           "error": {
             "type": [
               "object",
@@ -1064,55 +1094,6 @@
           },
           "404": {
             "description": "Job not found"
-          }
-        }
-      }
-    },
-    "/protocol/schemas": {
-      "get": {
-        "operationId": "getProtocolSchemas",
-        "summary": "List available protocol schemas from in-memory registry",
-        "responses": {
-          "200": {
-            "description": "Protocol schema index",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProtocolSchemaIndexResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/protocol/schema": {
-      "get": {
-        "operationId": "getProtocolSchemaById",
-        "summary": "Get full protocol schema by id from in-memory registry",
-        "parameters": [
-          {
-            "name": "schema_id",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Protocol schema",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProtocolSchemaByIdResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Schema not found"
           }
         }
       }

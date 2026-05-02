@@ -25,3 +25,30 @@ def test_render_gpt_action_schema_uses_embedded_fallback(monkeypatch) -> None:
 
     assert rendered["openapi"] == "3.1.0"
     assert rendered["servers"][0]["url"] == "https://example.test"
+
+
+def test_gpt_action_schema_operations_are_core_job_flow() -> None:
+    parsed = json.loads(GPT_ACTION_SCHEMA_TEMPLATE_JSON)
+    paths = parsed.get("paths", {})
+    operation_ids = set()
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for op in path_item.values():
+            if not isinstance(op, dict):
+                continue
+            operation_id = op.get("operationId")
+            if isinstance(operation_id, str):
+                operation_ids.add(operation_id)
+
+    expected = {
+        "getGatewayHealth",
+        "createCodexJob",
+        "getCodexJob",
+        "getCodexJobEvents",
+        "postCodexJobApproval",
+        "getCodexJobResult",
+    }
+    assert operation_ids == expected
+    assert "getProtocolSchemas" not in operation_ids
+    assert "getProtocolSchemaById" not in operation_ids

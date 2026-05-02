@@ -81,6 +81,19 @@ PROTOCOL_REGISTRY: dict = {
     "loaded_at_epoch": None,
     "errors": [],
 }
+PROGRESS_MILESTONE_METHODS = {
+    "job/running",
+    "job/waiting_approval",
+    "job/approval_auto_applied",
+    "job/approval_approved",
+    "job/approval_approved_all_similar",
+    "job/approval_guidance",
+    "job/approval_denied",
+    "turn/completed",
+    "error",
+    "job/completed",
+    "job/failed",
+}
 
 
 def _configure_logging() -> None:
@@ -499,6 +512,87 @@ def _to_iso(ts: int | None) -> str | None:
         return datetime.fromtimestamp(int(ts), tz=UTC).isoformat()
     except Exception:
         return None
+
+
+def _format_elapsed_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec}s"
+    hours, rem = divmod(minutes, 60)
+    return f"{hours}h {rem}m"
+
+
+def _progress_text(job: dict, method: str) -> str:
+    if method == "job/running":
+        return "Job started. Codex is working."
+    if method == "job/waiting_approval":
+        summary = (
+            str((job.get("approval_request") or {}).get("summary") or "").strip()
+            if isinstance(job.get("approval_request"), dict)
+            else ""
+        )
+        if summary:
+            return short_text(f"Approval required: {summary}", 240)
+        return "Approval required before job can continue."
+    if method == "job/approval_auto_applied":
+        return "Approval policy auto-applied. Job continues."
+    if method == "job/approval_approved":
+        return "Approval accepted. Job continues."
+    if method == "job/approval_approved_all_similar":
+        return "Approval accepted for similar requests. Job continues."
+    if method == "job/approval_guidance":
+        text = str(job.get("last_update_text") or "").strip()
+        return short_text(text, 240) if text else "Operator guidance applied. Job continues."
+    if method == "job/approval_denied":
+        return "Approval denied. Job may fail or stop."
+    if method == "turn/completed":
+        text = str(job.get("last_update_text") or "").strip()
+        return short_text(text, 240) if text else "Turn completed."
+    if method == "error":
+        text = str(job.get("last_update_text") or "").strip()
+        if text:
+            return short_text(f"Codex reported an error: {text}", 240)
+        return "Codex reported an error."
+    if method == "job/completed":
+        return "Job completed. Final result is ready."
+    if method == "job/failed":
+        err = job.get("error")
+        if isinstance(err, dict):
+            detail = str(err.get("detail") or "").strip()
+            if detail:
+                return short_text(f"Job failed: {detail}", 240)
+        return "Job failed."
+    return short_text(method, 240)
+
+
+def _append_progress_milestone(job: dict, method: str, now_ts: int) -> None:
+    if method not in PROGRESS_MILESTONE_METHODS:
+        return
+    start_ts = int(job.get("started_at") or job.get("created_at") or now_ts)
+    elapsed_sec = max(0, now_ts - start_ts)
+    text = _progress_text(job, method)
+    items = job.setdefault("progress_items", [])
+    if items:
+        last = items[-1]
+        if last.get("kind") == method and last.get("text") == text:
+            last["elapsed_sec"] = elapsed_sec
+            last["elapsed_label"] = _format_elapsed_label(elapsed_sec)
+            return
+    seq = int(job.get("progress_seq", 0) or 0) + 1
+    job["progress_seq"] = seq
+    items.append(
+        {
+            "seq": seq,
+            "kind": method,
+            "elapsed_sec": elapsed_sec,
+            "elapsed_label": _format_elapsed_label(elapsed_sec),
+            "text": text,
+        }
+    )
+    if len(items) > 100:
+        del items[: len(items) - 100]
 
 
 def _run_command(cmd: list[str], cwd: Path, timeout: int) -> dict:
@@ -1184,6 +1278,7 @@ async def _run_job(job_id: str) -> None:
         job["updated_at"] = now
         if method:
             job["last_event_method"] = method
+            _append_progress_milestone(job, method, now)
         if not wake_poll:
             return
         if notify_event.is_set():
@@ -1399,6 +1494,8 @@ def _create_job(payload: CodexRequest) -> dict:
         "events": [],
         "event_seq": 0,
         "last_drained_seq": 0,
+        "progress_seq": 0,
+        "progress_items": [],
         "notify_event": asyncio.Event(),
         "done_event": asyncio.Event(),
         "error": None,
