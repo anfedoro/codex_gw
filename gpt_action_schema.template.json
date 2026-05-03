@@ -904,6 +904,250 @@
         },
         "additionalProperties": true
       },
+      "SwitchProjectContextRequest": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": "string"
+          },
+          "thread_policy": {
+            "type": "string",
+            "enum": [
+              "reuse_latest",
+              "create_new"
+            ],
+            "default": "reuse_latest"
+          },
+          "create_project_if_missing": {
+            "type": "boolean",
+            "default": true
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "sandbox": {
+            "type": "string",
+            "enum": [
+              "read-only",
+              "workspace-write",
+              "danger-full-access"
+            ]
+          },
+          "approvals": {
+            "type": "string"
+          },
+          "app_server_url": {
+            "type": "string"
+          },
+          "app_server_bearer_token": {
+            "type": "string"
+          },
+          "interaction_mode": {
+            "type": "string",
+            "enum": [
+              "execution",
+              "planning"
+            ],
+            "default": "execution"
+          }
+        },
+        "required": [
+          "project_path"
+        ],
+        "additionalProperties": false
+      },
+      "SwitchProjectContextResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectItem"
+          },
+          "created_project": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "thread_status": {
+            "type": "string",
+            "enum": [
+              "resumed",
+              "created_new"
+            ]
+          },
+          "interaction_mode": {
+            "type": "string"
+          },
+          "stale_thread_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "message_for_client": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AvailableModelItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_reasoning_effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supported_reasoning_efforts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supported_in_api": {
+            "type": "boolean"
+          },
+          "visibility": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "AvailableModelsResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AvailableModelItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "SelectThreadModelRequest": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "interaction_mode": {
+            "type": "string",
+            "enum": [
+              "execution",
+              "planning"
+            ],
+            "default": "execution"
+          },
+          "app_server_url": {
+            "type": "string"
+          },
+          "app_server_bearer_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "model"
+        ],
+        "additionalProperties": false
+      },
+      "SelectThreadModelResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "previous_thread_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "interaction_mode": {
+            "type": "string"
+          },
+          "selected_model": {
+            "type": "string"
+          },
+          "selected_reasoning_effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "message_for_client": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
       "ThreadsResponse": {
         "type": "object",
         "properties": {
@@ -1180,6 +1424,80 @@
           },
           "404": {
             "description": "Thread not found"
+          }
+        }
+      }
+    },
+    "/context/switch": {
+      "post": {
+        "operationId": "switchProjectContext",
+        "summary": "Select project context and reuse/create thread with fallback",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchProjectContextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Context switched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchProjectContextResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "listAvailableModels",
+        "summary": "Get runtime model catalog from Codex",
+        "responses": {
+          "200": {
+            "description": "Runtime model catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/model": {
+      "post": {
+        "operationId": "selectModelForThread",
+        "summary": "Validate model and create a new thread in same project with selected model",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectThreadModelRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelectThreadModelResponse"
+                }
+              }
+            }
           }
         }
       }

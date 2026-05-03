@@ -206,6 +206,9 @@ The imported GPT OpenAPI includes admin context actions plus execution job-flow:
 - `listThreads`
 - `getThread`
 - `createThread`
+- `switchProjectContext`
+- `listAvailableModels`
+- `selectModelForThread`
 - `createCodexJob`
 - `getCodexJob`
 - `getCodexJobEvents`

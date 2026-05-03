@@ -68,3 +68,25 @@ class ThreadCreateRequest(BaseModel):
     app_server_url: str | None = None
     app_server_bearer_token: str | None = None
     interaction_mode: Literal["execution", "planning"] = "execution"
+
+
+class SwitchProjectContextRequest(BaseModel):
+    project_path: str
+    thread_policy: Literal["reuse_latest", "create_new"] = "reuse_latest"
+    create_project_if_missing: bool = True
+    model: str | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
+    sandbox: Literal["read-only", "workspace-write", "danger-full-access"] | None = None
+    approvals: str | None = None
+    app_server_url: str | None = None
+    app_server_bearer_token: str | None = None
+    interaction_mode: Literal["execution", "planning"] = "execution"
+
+
+class SelectThreadModelRequest(BaseModel):
+    thread_id: str
+    model: str
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
+    interaction_mode: Literal["execution", "planning"] = "execution"
+    app_server_url: str | None = None
+    app_server_bearer_token: str | None = None

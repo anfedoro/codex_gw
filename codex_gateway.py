@@ -33,6 +33,8 @@ from cgw.models import (
     CodexJobRequest,
     CodexRequest,
     ProjectCreateRequest,
+    SelectThreadModelRequest,
+    SwitchProjectContextRequest,
     TaskRequest,
     ThreadCreateRequest,
 )
@@ -463,6 +465,58 @@ def _project_item(cwd: Path, thread_count: int, last_updated_at: str | None) -> 
         "thread_count": thread_count,
         "last_updated_at": last_updated_at,
     }
+
+
+def _extract_json_payload(raw: str) -> dict:
+    if not isinstance(raw, str):
+        raise ValueError("command output is not text")
+    start = raw.find("{")
+    if start < 0:
+        raise ValueError("JSON payload not found in command output")
+    return json.loads(raw[start:])
+
+
+def _normalize_model_catalog(payload: dict) -> list[dict]:
+    models: list[dict] = []
+    entries = payload.get("models")
+    if not isinstance(entries, list):
+        return models
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("slug") or item.get("id") or item.get("model")
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        supported = item.get("supported_reasoning_levels")
+        supported_levels: list[str] = []
+        if isinstance(supported, list):
+            for level in supported:
+                if isinstance(level, dict):
+                    effort = level.get("effort")
+                    if isinstance(effort, str) and effort:
+                        supported_levels.append(effort)
+        models.append(
+            {
+                "id": model_id,
+                "display_name": item.get("display_name"),
+                "description": item.get("description"),
+                "default_reasoning_effort": item.get("default_reasoning_level"),
+                "supported_reasoning_efforts": supported_levels,
+                "supported_in_api": bool(item.get("supported_in_api", False)),
+                "visibility": item.get("visibility"),
+                "priority": item.get("priority"),
+            }
+        )
+    return models
+
+
+def _is_no_rollout_error(detail: object) -> bool:
+    try:
+        text = json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        text = str(detail)
+    lowered = text.lower()
+    return "no rollout found" in lowered or "thread not found" in lowered
 
 
 def _gateway_base_url(request: Request) -> str:
@@ -1144,6 +1198,40 @@ async def list_threads(
     return {"state_db": str(state_db), "data": data}
 
 
+def _latest_thread_id_for_cwd(cwd: str) -> tuple[str | None, str]:
+    sql = """
+    SELECT id
+    FROM threads
+    WHERE archived = 0
+      AND cwd = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+    """
+    state_db, rows = query_state_db(sql, (cwd,))
+    if not rows:
+        return None, str(state_db)
+    thread_id = rows[0]["id"]
+    if not isinstance(thread_id, str) or not thread_id:
+        return None, str(state_db)
+    return thread_id, str(state_db)
+
+
+def _thread_cwd_from_db(thread_id: str) -> str:
+    sql = """
+    SELECT cwd
+    FROM threads
+    WHERE id = ?
+    LIMIT 1
+    """
+    _state_db, rows = query_state_db(sql, (thread_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    cwd = rows[0]["cwd"]
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise HTTPException(status_code=400, detail="Thread has empty cwd")
+    return cwd
+
+
 @app.post("/threads")
 async def create_thread(payload: ThreadCreateRequest) -> dict:
     req = CodexRequest(
@@ -1177,6 +1265,151 @@ async def create_thread(payload: ThreadCreateRequest) -> dict:
         "app_server_url": result.get("app_server_url"),
         "thread_id": thread_id,
         "thread": thread,
+    }
+
+
+@app.get("/models")
+async def list_available_models() -> dict:
+    result = _run_command(["codex", "debug", "models"], REPO, timeout=60)
+    if int(result.get("exit_code", 1)) != 0:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Failed to load model catalog from codex runtime",
+                "stderr": short_text(str(result.get("stderr") or ""), 1000),
+                "exit_code": result.get("exit_code"),
+            },
+        )
+    try:
+        parsed = _extract_json_payload(str(result.get("stdout") or ""))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Invalid JSON from codex debug models",
+                "error": str(exc),
+            },
+        ) from exc
+    models = _normalize_model_catalog(parsed)
+    return {
+        "status": "ok",
+        "source": "codex_debug_models",
+        "count": len(models),
+        "models": models,
+    }
+
+
+@app.post("/threads/model")
+async def select_model_for_thread(payload: SelectThreadModelRequest) -> dict:
+    catalog = await list_available_models()
+    models = catalog.get("models", [])
+    selected = next((m for m in models if isinstance(m, dict) and m.get("id") == payload.model), None)
+    if selected is None:
+        available = [m.get("id") for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)]
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"Model is not available in runtime catalog: {payload.model}",
+                "available_models": available,
+            },
+        )
+    cwd = _thread_cwd_from_db(payload.thread_id)
+    created = await create_thread(
+        ThreadCreateRequest(
+            cwd=cwd,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+            app_server_url=payload.app_server_url,
+            app_server_bearer_token=payload.app_server_bearer_token,
+            interaction_mode=payload.interaction_mode,
+        )
+    )
+    return {
+        "status": "ok",
+        "previous_thread_id": payload.thread_id,
+        "thread_id": created.get("thread_id"),
+        "interaction_mode": payload.interaction_mode,
+        "selected_model": payload.model,
+        "selected_reasoning_effort": payload.reasoning_effort,
+        "thread": created.get("thread"),
+        "message_for_client": "Model applied by creating a new thread in the same project.",
+    }
+
+
+@app.post("/context/switch")
+async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
+    project_info = await create_project(
+        ProjectCreateRequest(
+            cwd=payload.project_path,
+            create_if_missing=payload.create_project_if_missing,
+        )
+    )
+    project = project_info["project"]
+    cwd = str(project["cwd"])
+    reused_thread_id: str | None = None
+    stale_thread_id: str | None = None
+
+    if payload.thread_policy == "reuse_latest":
+        latest_thread_id, _state_db = _latest_thread_id_for_cwd(cwd)
+        if latest_thread_id:
+            resume_req = CodexRequest(
+                backend="app_server_ws",
+                kind="resume",
+                session_id=latest_thread_id,
+                prompt=None,
+                use_exec=False,
+                app_server_url=payload.app_server_url,
+                app_server_bearer_token=payload.app_server_bearer_token,
+                include_events=False,
+                max_events=0,
+                diff_mode="off",
+            )
+            try:
+                resumed = await _execute_codex_with_updates(resume_req, on_update=None, on_server_request=None)
+                thread = resumed.get("thread") if isinstance(resumed, dict) else None
+                if isinstance(thread, dict):
+                    thread_id = thread.get("id")
+                    if isinstance(thread_id, str) and thread_id:
+                        reused_thread_id = thread_id
+                        return {
+                            "status": "ok",
+                            "project": project,
+                            "created_project": bool(project_info.get("created")),
+                            "thread_id": reused_thread_id,
+                            "thread_status": "resumed",
+                            "interaction_mode": payload.interaction_mode,
+                            "thread": thread,
+                            "message_for_client": "Project selected. Existing thread resumed.",
+                        }
+                stale_thread_id = latest_thread_id
+            except HTTPException as exc:
+                if _is_no_rollout_error(exc.detail):
+                    stale_thread_id = latest_thread_id
+                else:
+                    raise
+
+    created = await create_thread(
+        ThreadCreateRequest(
+            cwd=cwd,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+            sandbox=payload.sandbox,
+            approvals=payload.approvals,
+            app_server_url=payload.app_server_url,
+            app_server_bearer_token=payload.app_server_bearer_token,
+            interaction_mode=payload.interaction_mode,
+        )
+    )
+    return {
+        "status": "ok",
+        "project": project,
+        "created_project": bool(project_info.get("created")),
+        "thread_id": created.get("thread_id"),
+        "thread_status": "created_new",
+        "interaction_mode": payload.interaction_mode,
+        "thread": created.get("thread"),
+        "stale_thread_id": stale_thread_id,
+        "message_for_client": "Project selected. New thread created for communication.",
     }
 
 
