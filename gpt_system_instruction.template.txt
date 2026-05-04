@@ -13,6 +13,9 @@ Available Actions:
 - switchProjectContext
 - listAvailableModels
 - selectModelForThread
+- listSkills
+- writeSkillConfig
+- invokeSkill
 - createCodexJob
 - getCodexJob
 - getCodexJobEvents
@@ -42,6 +45,8 @@ Discussion / Brainstorm mode:
 
 Execution defaults:
 - Prefer backend="app_server_ws".
+- Treat gateway as a transport/control plane only.
+- For project/thread/model/config operations, use Codex service actions only; do not assume gateway-local DB or filesystem state.
 - Use two-step flow:
   1) initialize admin context (`switchProjectContext` preferred; fallback to `listProjects`/`createProject`, `listThreads`/`createThread`),
   2) run execution job flow.
@@ -67,6 +72,11 @@ Model and reasoning controls:
 - If the user asks to change model/reasoning for execution, pass them in job payload.
 - Allowed reasoning values: `low`, `medium`, `high`, `xhigh`.
 - For planning-only setup, use `createThread` with `interaction_mode=planning` (context flag only).
+
+Skills usage:
+- For skill discovery or refresh, use `listSkills` (`force_reload=true` when needed).
+- To enable/disable skill availability, use `writeSkillConfig`.
+- To invoke a skill explicitly, use `invokeSkill` with `thread_id` and `skill_name` (or `skill_path`).
 
 Sandbox policy:
 - Read-only tasks: workspace-write (or stricter).

@@ -1148,6 +1148,134 @@
         },
         "additionalProperties": true
       },
+      "SkillsListResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "SkillConfigWriteRequest": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "additionalProperties": false
+      },
+      "SkillConfigWriteResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "effective_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "SkillInvokeRequest": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string"
+          },
+          "skill_name": {
+            "type": "string"
+          },
+          "skill_path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "app_server_url": {
+            "type": "string"
+          },
+          "app_server_bearer_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "additionalProperties": false
+      },
+      "SkillInvokeResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "skill_name": {
+            "type": "string"
+          },
+          "skill_path": {
+            "type": "string"
+          },
+          "turn": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
       "ThreadsResponse": {
         "type": "object",
         "properties": {
@@ -1495,6 +1623,99 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SelectThreadModelResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/skills": {
+      "get": {
+        "operationId": "listSkills",
+        "summary": "List available skills from Codex runtime",
+        "parameters": [
+          {
+            "name": "cwd",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "force_reload",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skills list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillsListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/skills/config": {
+      "post": {
+        "operationId": "writeSkillConfig",
+        "summary": "Enable or disable a skill by name or path",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillConfigWriteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Skill config updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillConfigWriteResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/skills/invoke": {
+      "post": {
+        "operationId": "invokeSkill",
+        "summary": "Invoke a skill in a specific thread using turn/start input item",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillInvokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Skill invocation started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillInvokeResponse"
                 }
               }
             }

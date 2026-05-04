@@ -90,3 +90,26 @@ class SelectThreadModelRequest(BaseModel):
     interaction_mode: Literal["execution", "planning"] = "execution"
     app_server_url: str | None = None
     app_server_bearer_token: str | None = None
+
+
+class SkillsListRequest(BaseModel):
+    cwd: str | None = None
+    force_reload: bool = False
+
+
+class SkillConfigWriteRequest(BaseModel):
+    enabled: bool
+    name: str | None = None
+    path: str | None = None
+
+
+class SkillInvokeRequest(BaseModel):
+    thread_id: str
+    skill_name: str | None = None
+    skill_path: str | None = None
+    text: str | None = None
+    model: str | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
+    cwd: str | None = None
+    app_server_url: str | None = None
+    app_server_bearer_token: str | None = None

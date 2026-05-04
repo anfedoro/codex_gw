@@ -33,13 +33,15 @@ from cgw.models import (
     CodexJobRequest,
     CodexRequest,
     ProjectCreateRequest,
+    SkillConfigWriteRequest,
+    SkillInvokeRequest,
+    SkillsListRequest,
     SelectThreadModelRequest,
     SwitchProjectContextRequest,
     TaskRequest,
     ThreadCreateRequest,
 )
 from cgw.protocol_registry import ProtocolRegistryError, build_registry_with_generation
-from cgw.state_db import query_state_db, thread_display_name
 from cgw.text_utils import clip_text, short_text, tail_file
 
 
@@ -434,34 +436,18 @@ def _validate_app_server_cwd(cwd_value: str | None) -> Path | None:
     return cwd
 
 
-def _resolve_project_cwd(cwd_value: str) -> Path:
+def _resolve_project_cwd(cwd_value: str) -> str:
     if not isinstance(cwd_value, str) or not cwd_value.strip():
         raise HTTPException(status_code=400, detail="cwd must be a non-empty string")
-    return Path(cwd_value).expanduser().resolve()
+    return str(Path(cwd_value).expanduser().resolve())
 
 
-def _project_stats(cwd: Path) -> tuple[int, str | None, str]:
-    sql = """
-    SELECT
-      COUNT(*) AS thread_count,
-      MAX(updated_at) AS last_updated_at
-    FROM threads
-    WHERE archived = 0
-      AND cwd = ?
-    """
-    state_db, rows = query_state_db(sql, (str(cwd),))
-    row = rows[0] if rows else {"thread_count": 0, "last_updated_at": None}
-    thread_count = int(row["thread_count"] or 0)
-    last_updated_at = _to_iso(row["last_updated_at"])
-    return thread_count, last_updated_at, str(state_db)
-
-
-def _project_item(cwd: Path, thread_count: int, last_updated_at: str | None) -> dict:
-    cwd_str = str(cwd)
+def _project_item(cwd: str, thread_count: int, last_updated_at: str | None) -> dict:
+    project_name = Path(cwd).name if cwd else cwd
     return {
-        "project_id": cwd_str,
-        "cwd": cwd_str,
-        "name": cwd.name or cwd_str,
+        "project_id": cwd,
+        "cwd": cwd,
+        "name": project_name or cwd,
         "thread_count": thread_count,
         "last_updated_at": last_updated_at,
     }
@@ -517,6 +503,117 @@ def _is_no_rollout_error(detail: object) -> bool:
         text = str(detail)
     lowered = text.lower()
     return "no rollout found" in lowered or "thread not found" in lowered
+
+
+async def _app_server_rpc(
+    method: str,
+    params: dict | None = None,
+    *,
+    app_server_url: str | None = None,
+    app_server_bearer_token: str | None = None,
+) -> dict:
+    try:
+        from websockets.asyncio.client import connect as ws_connect
+    except Exception:
+        try:
+            from websockets import connect as ws_connect  # type: ignore
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="websockets package is required for app_server_ws backend",
+            ) from exc
+
+    url = app_server_url or APP_SERVER_URL
+    token = app_server_bearer_token or APP_SERVER_BEARER_TOKEN
+    timeout = APP_SERVER_TIMEOUT_SECONDS
+
+    connect_kwargs: dict = {}
+    if token:
+        connect_kwargs["additional_headers"] = {"Authorization": f"Bearer {token}"}
+    try:
+        ws_ctx = ws_connect(url, **connect_kwargs)
+    except TypeError:
+        connect_kwargs = {}
+        if token:
+            connect_kwargs["extra_headers"] = {"Authorization": f"Bearer {token}"}
+        ws_ctx = ws_connect(url, **connect_kwargs)
+
+    async with ws_ctx as ws:
+        await ws.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"clientInfo": {"name": "codex-gateway", "version": "1.0.0"}},
+                }
+            )
+        )
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            msg = json.loads(raw)
+            if msg.get("id") == 1:
+                if "error" in msg:
+                    raise HTTPException(status_code=502, detail=f"app-server init error: {msg['error']}")
+                break
+
+        await ws.send(json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+        await ws.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": method,
+                    "params": params or {},
+                }
+            )
+        )
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            msg = json.loads(raw)
+            if msg.get("id") == 2:
+                if "error" in msg:
+                    raise HTTPException(status_code=502, detail={"message": "app-server error", "error": msg["error"]})
+                return msg.get("result", {}) if isinstance(msg.get("result"), dict) else {}
+            if "id" in msg and "method" in msg and "result" not in msg and "error" not in msg:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": msg["id"],
+                            "error": {
+                                "code": -32004,
+                                "message": f"Unsupported server request in gateway RPC mode: {msg.get('method')}",
+                            },
+                        }
+                    )
+                )
+
+
+def _thread_item_from_codex(thread: dict, *, preview_limit: int = 220, first_limit: int = 220) -> dict:
+    thread_id = str(thread.get("id") or "")
+    cwd = str(thread.get("cwd") or "")
+    title = str(thread.get("name") or "")
+    first_msg = str(thread.get("preview") or "")
+    preview = short_text(first_msg if first_msg else title, preview_limit)
+    display_base = title or first_msg or thread_id
+    project_name = Path(cwd).name if cwd else None
+    display_name = f"{project_name or 'project'}: {short_text(display_base, 90)}"
+    return {
+        "thread_id": thread_id,
+        "short_thread_id": thread_id[:8],
+        "project_name": project_name,
+        "title": title,
+        "first_user_message": short_text(first_msg, first_limit),
+        "preview": preview,
+        "display_name": display_name,
+        "cwd": cwd,
+        "created_at": _to_iso(thread.get("createdAt") if isinstance(thread.get("createdAt"), int) else None),
+        "updated_at": _to_iso(thread.get("updatedAt") if isinstance(thread.get("updatedAt"), int) else None),
+        "model_provider": thread.get("modelProvider"),
+        "model": None,
+        "reasoning_effort": None,
+    }
 
 
 def _gateway_base_url(request: Request) -> str:
@@ -1088,57 +1185,59 @@ async def list_projects(
     limit: int = Query(default=200, ge=1, le=5000),
     existing_only: bool = Query(default=True, description="Return only projects with existing cwd"),
 ) -> dict:
-    sql = """
-    SELECT
-      cwd,
-      COUNT(*) AS thread_count,
-      MAX(updated_at) AS last_updated_at
-    FROM threads
-    WHERE archived = 0
-      AND cwd IS NOT NULL
-      AND cwd != ''
-    GROUP BY cwd
-    ORDER BY last_updated_at DESC
-    LIMIT ?
-    """
-    state_db, rows = query_state_db(sql, (limit,))
-    data = []
-    for row in rows:
-        cwd = row["cwd"]
-        if existing_only and (not cwd or not Path(cwd).exists() or not Path(cwd).is_dir()):
+    _ = existing_only  # Kept for API compatibility; remote runtime decides visibility.
+    result = await _app_server_rpc("thread/list", {"archived": False, "limit": limit})
+    threads = result.get("data", []) if isinstance(result.get("data"), list) else []
+    projects: dict[str, dict] = {}
+    for item in threads:
+        if not isinstance(item, dict):
             continue
-        data.append(
-            _project_item(
-                Path(cwd),
-                thread_count=int(row["thread_count"] or 0),
-                last_updated_at=_to_iso(row["last_updated_at"]),
-            )
-        )
-    return {"state_db": str(state_db), "data": data}
+        cwd = str(item.get("cwd") or "").strip()
+        if not cwd:
+            continue
+        updated_at_ts = item.get("updatedAt") if isinstance(item.get("updatedAt"), int) else None
+        updated_at = _to_iso(updated_at_ts)
+        if cwd not in projects:
+            projects[cwd] = _project_item(cwd, thread_count=1, last_updated_at=updated_at)
+            continue
+        projects[cwd]["thread_count"] = int(projects[cwd]["thread_count"]) + 1
+        prev = projects[cwd].get("last_updated_at")
+        if updated_at and (not prev or str(updated_at) > str(prev)):
+            projects[cwd]["last_updated_at"] = updated_at
+
+    data = sorted(
+        projects.values(),
+        key=lambda x: str(x.get("last_updated_at") or ""),
+        reverse=True,
+    )[:limit]
+    return {"source": "codex_thread_list", "data": data}
 
 
 @app.post("/projects")
 async def create_project(payload: ProjectCreateRequest) -> dict:
     cwd = _resolve_project_cwd(payload.cwd)
-    created = False
-    if cwd.exists():
-        if not cwd.is_dir():
-            raise HTTPException(status_code=400, detail=f"cwd exists and is not a directory: {cwd}")
-    else:
-        if not payload.create_if_missing:
-            raise HTTPException(status_code=404, detail=f"cwd does not exist: {cwd}")
-        try:
-            cwd.mkdir(parents=True, exist_ok=True)
-            created = True
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"failed to create cwd: {cwd}: {exc}") from exc
-
-    thread_count, last_updated_at, state_db = _project_stats(cwd)
+    # Codex-only mode: no direct filesystem operations in gateway.
+    await _app_server_rpc("config/read", {"cwd": cwd, "includeLayers": False})
+    listed = await _app_server_rpc("thread/list", {"archived": False, "cwd": cwd, "limit": 5000})
+    threads = listed.get("data", []) if isinstance(listed.get("data"), list) else []
+    thread_count = len([x for x in threads if isinstance(x, dict)])
+    last_ts = None
+    for item in threads:
+        if not isinstance(item, dict):
+            continue
+        ts = item.get("updatedAt")
+        if isinstance(ts, int):
+            last_ts = max(last_ts, ts) if isinstance(last_ts, int) else ts
+    last_updated_at = _to_iso(last_ts if isinstance(last_ts, int) else None)
     return {
         "status": "ok",
-        "created": created,
-        "state_db": state_db,
+        "created": False,
+        "source": "codex_config_read",
         "project": _project_item(cwd, thread_count, last_updated_at),
+        "note": (
+            "Gateway does not mutate filesystem in Codex-only mode. "
+            "Project path is registered as context through Codex runtime."
+        ),
     }
 
 
@@ -1148,88 +1247,203 @@ async def list_threads(
     limit: int = Query(default=100, ge=1, le=5000),
     existing_only: bool = Query(default=True, description="Return only threads with existing cwd"),
 ) -> dict:
-    sql_base = """
-    SELECT
-      id,
-      title,
-      cwd,
-      updated_at,
-      created_at,
-      model_provider,
-      model,
-      reasoning_effort,
-      first_user_message
-    FROM threads
-    WHERE archived = 0
-    """
-    args: list = []
+    _ = existing_only  # Kept for API compatibility; remote runtime decides visibility.
+    params: dict = {"archived": False, "limit": limit}
     if cwd:
-        sql_base += " AND cwd = ?"
-        args.append(cwd)
-    sql_base += " ORDER BY updated_at DESC LIMIT ?"
-    args.append(limit)
-    state_db, rows = query_state_db(sql_base, tuple(args))
-    data = []
-    for row in rows:
-        thread_cwd = row["cwd"]
-        if existing_only and (not thread_cwd or not Path(thread_cwd).exists() or not Path(thread_cwd).is_dir()):
-            continue
-        title = row["title"] or ""
-        first_msg = row["first_user_message"] or ""
-        preview = short_text(title if title else first_msg, 220)
-        display_name = thread_display_name(thread_cwd, title, first_msg, row["id"])
-        data.append(
-            {
-                "thread_id": row["id"],
-                "short_thread_id": str(row["id"])[:8],
-                "project_name": Path(thread_cwd).name if thread_cwd else None,
-                "title": title,
-                "first_user_message": short_text(first_msg, 220),
-                "preview": preview,
-                "display_name": display_name,
-                "cwd": thread_cwd,
-                "created_at": _to_iso(row["created_at"]),
-                "updated_at": _to_iso(row["updated_at"]),
-                "model_provider": row["model_provider"],
-                "model": row["model"],
-                "reasoning_effort": row["reasoning_effort"],
-            }
-        )
-    return {"state_db": str(state_db), "data": data}
+        params["cwd"] = str(Path(cwd).expanduser().resolve())
+    result = await _app_server_rpc("thread/list", params)
+    threads = result.get("data", []) if isinstance(result.get("data"), list) else []
+    data = [
+        _thread_item_from_codex(item)
+        for item in threads
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    return {"source": "codex_thread_list", "data": data}
 
 
-def _latest_thread_id_for_cwd(cwd: str) -> tuple[str | None, str]:
-    sql = """
-    SELECT id
-    FROM threads
-    WHERE archived = 0
-      AND cwd = ?
-    ORDER BY updated_at DESC
-    LIMIT 1
-    """
-    state_db, rows = query_state_db(sql, (cwd,))
-    if not rows:
-        return None, str(state_db)
-    thread_id = rows[0]["id"]
-    if not isinstance(thread_id, str) or not thread_id:
-        return None, str(state_db)
-    return thread_id, str(state_db)
+async def _latest_thread_id_for_cwd(
+    cwd: str,
+    *,
+    app_server_url: str | None = None,
+    app_server_bearer_token: str | None = None,
+) -> str | None:
+    result = await _app_server_rpc(
+        "thread/list",
+        {"archived": False, "cwd": cwd, "limit": 1, "sortKey": "updated_at", "sortDirection": "desc"},
+        app_server_url=app_server_url,
+        app_server_bearer_token=app_server_bearer_token,
+    )
+    threads = result.get("data", []) if isinstance(result.get("data"), list) else []
+    if not threads:
+        return None
+    first = threads[0]
+    if not isinstance(first, dict):
+        return None
+    thread_id = first.get("id")
+    return thread_id if isinstance(thread_id, str) and thread_id else None
 
 
-def _thread_cwd_from_db(thread_id: str) -> str:
-    sql = """
-    SELECT cwd
-    FROM threads
-    WHERE id = ?
-    LIMIT 1
-    """
-    _state_db, rows = query_state_db(sql, (thread_id,))
-    if not rows:
+async def _thread_cwd_from_runtime(
+    thread_id: str,
+    *,
+    app_server_url: str | None = None,
+    app_server_bearer_token: str | None = None,
+) -> str:
+    result = await _app_server_rpc(
+        "thread/read",
+        {"threadId": thread_id, "includeTurns": False},
+        app_server_url=app_server_url,
+        app_server_bearer_token=app_server_bearer_token,
+    )
+    thread = result.get("thread")
+    if not isinstance(thread, dict):
         raise HTTPException(status_code=404, detail="Thread not found")
-    cwd = rows[0]["cwd"]
+    cwd = thread.get("cwd")
     if not isinstance(cwd, str) or not cwd.strip():
         raise HTTPException(status_code=400, detail="Thread has empty cwd")
     return cwd
+
+
+def _normalize_skills_response(payload: dict) -> list[dict]:
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        cwd = entry.get("cwd")
+        errors = entry.get("errors")
+        skills = entry.get("skills")
+        out.append(
+            {
+                "cwd": cwd if isinstance(cwd, str) else None,
+                "errors": errors if isinstance(errors, list) else [],
+                "skills": skills if isinstance(skills, list) else [],
+            }
+        )
+    return out
+
+
+def _find_skill_path(entries: list[dict], skill_name: str) -> str | None:
+    matches: list[str] = []
+    for entry in entries:
+        skills = entry.get("skills")
+        if not isinstance(skills, list):
+            continue
+        for skill in skills:
+            if not isinstance(skill, dict):
+                continue
+            name = skill.get("name")
+            path = skill.get("path")
+            if isinstance(name, str) and isinstance(path, str) and name == skill_name:
+                matches.append(path)
+    unique = list(dict.fromkeys(matches))
+    if len(unique) == 1:
+        return unique[0]
+    return None
+
+
+@app.get("/skills")
+async def list_skills(
+    cwd: str | None = Query(default=None, description="Optional cwd filter"),
+    force_reload: bool = Query(default=False, description="Bypass skills cache and reload from disk"),
+) -> dict:
+    params: dict = {"forceReload": bool(force_reload)}
+    if cwd:
+        params["cwds"] = [str(Path(cwd).expanduser().resolve())]
+    result = await _app_server_rpc("skills/list", params)
+    entries = _normalize_skills_response(result)
+    total = 0
+    for entry in entries:
+        total += len(entry.get("skills", []))
+    return {
+        "status": "ok",
+        "source": "codex_skills_list",
+        "count": total,
+        "data": entries,
+    }
+
+
+@app.post("/skills/config")
+async def write_skill_config(payload: SkillConfigWriteRequest) -> dict:
+    if not (payload.name or payload.path):
+        raise HTTPException(status_code=400, detail="Either name or path is required")
+    params: dict = {"enabled": payload.enabled}
+    if payload.name:
+        params["name"] = payload.name
+    if payload.path:
+        params["path"] = payload.path
+    result = await _app_server_rpc("skills/config/write", params)
+    return {
+        "status": "ok",
+        "source": "codex_skills_config_write",
+        "effective_enabled": result.get("effectiveEnabled"),
+    }
+
+
+@app.post("/skills/invoke")
+async def invoke_skill(payload: SkillInvokeRequest) -> dict:
+    if not payload.skill_name and not payload.skill_path:
+        raise HTTPException(status_code=400, detail="Either skill_name or skill_path is required")
+    thread_cwd = await _thread_cwd_from_runtime(
+        payload.thread_id,
+        app_server_url=payload.app_server_url,
+        app_server_bearer_token=payload.app_server_bearer_token,
+    )
+    skill_path = payload.skill_path
+    skill_name = payload.skill_name
+    if not skill_path:
+        listed = await _app_server_rpc(
+            "skills/list",
+            {"cwds": [thread_cwd], "forceReload": False},
+            app_server_url=payload.app_server_url,
+            app_server_bearer_token=payload.app_server_bearer_token,
+        )
+        entries = _normalize_skills_response(listed)
+        if not skill_name:
+            raise HTTPException(status_code=400, detail="skill_name is required when skill_path is not provided")
+        resolved = _find_skill_path(entries, skill_name)
+        if not resolved:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": f"Skill not found or ambiguous by name: {skill_name}",
+                    "cwd": thread_cwd,
+                },
+            )
+        skill_path = resolved
+    if not skill_name:
+        skill_name = Path(skill_path).name
+
+    input_items: list[dict] = [{"type": "skill", "name": skill_name, "path": skill_path}]
+    if payload.text and payload.text.strip():
+        input_items.append({"type": "text", "text": payload.text})
+
+    params: dict = {
+        "threadId": payload.thread_id,
+        "input": input_items,
+    }
+    if payload.model:
+        params["model"] = payload.model
+    if payload.reasoning_effort:
+        params["effort"] = payload.reasoning_effort
+    if payload.cwd:
+        params["cwd"] = str(Path(payload.cwd).expanduser().resolve())
+    result = await _app_server_rpc(
+        "turn/start",
+        params,
+        app_server_url=payload.app_server_url,
+        app_server_bearer_token=payload.app_server_bearer_token,
+    )
+    return {
+        "status": "ok",
+        "source": "codex_turn_start",
+        "thread_id": payload.thread_id,
+        "skill_name": skill_name,
+        "skill_path": skill_path,
+        "turn": result.get("turn"),
+    }
 
 
 @app.post("/threads")
@@ -1313,7 +1527,11 @@ async def select_model_for_thread(payload: SelectThreadModelRequest) -> dict:
                 "available_models": available,
             },
         )
-    cwd = _thread_cwd_from_db(payload.thread_id)
+    cwd = await _thread_cwd_from_runtime(
+        payload.thread_id,
+        app_server_url=payload.app_server_url,
+        app_server_bearer_token=payload.app_server_bearer_token,
+    )
     created = await create_thread(
         ThreadCreateRequest(
             cwd=cwd,
@@ -1350,7 +1568,11 @@ async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
     stale_thread_id: str | None = None
 
     if payload.thread_policy == "reuse_latest":
-        latest_thread_id, _state_db = _latest_thread_id_for_cwd(cwd)
+        latest_thread_id = await _latest_thread_id_for_cwd(
+            cwd,
+            app_server_url=payload.app_server_url,
+            app_server_bearer_token=payload.app_server_bearer_token,
+        )
         if latest_thread_id:
             resume_req = CodexRequest(
                 backend="app_server_ws",
@@ -1415,45 +1637,15 @@ async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
 
 @app.get("/threads/{thread_id}")
 async def get_thread(thread_id: str) -> dict:
-    sql = """
-    SELECT
-      id,
-      title,
-      cwd,
-      created_at,
-      updated_at,
-      model_provider,
-      model,
-      reasoning_effort,
-      first_user_message
-    FROM threads
-    WHERE id = ?
-    LIMIT 1
-    """
-    state_db, rows = query_state_db(sql, (thread_id,))
-    if not rows:
+    result = await _app_server_rpc("thread/read", {"threadId": thread_id, "includeTurns": False})
+    thread = result.get("thread")
+    if not isinstance(thread, dict):
         raise HTTPException(status_code=404, detail="Thread not found")
-    row = rows[0]
-    title = row["title"] or ""
-    first_msg = row["first_user_message"] or ""
-    preview = short_text(title if title else first_msg, 400)
-    display_name = thread_display_name(row["cwd"], title, first_msg, row["id"])
+    item = _thread_item_from_codex(thread, preview_limit=400, first_limit=400)
     return {
-        "state_db": str(state_db),
+        "source": "codex_thread_read",
         "thread": {
-            "thread_id": row["id"],
-            "short_thread_id": str(row["id"])[:8],
-            "project_name": Path(row["cwd"]).name if row["cwd"] else None,
-            "title": title,
-            "first_user_message": short_text(first_msg, 400),
-            "preview": preview,
-            "display_name": display_name,
-            "cwd": row["cwd"],
-            "created_at": _to_iso(row["created_at"]),
-            "updated_at": _to_iso(row["updated_at"]),
-            "model_provider": row["model_provider"],
-            "model": row["model"],
-            "reasoning_effort": row["reasoning_effort"],
+            **item,
         },
     }
 

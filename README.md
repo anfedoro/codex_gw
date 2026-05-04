@@ -209,11 +209,18 @@ The imported GPT OpenAPI includes admin context actions plus execution job-flow:
 - `switchProjectContext`
 - `listAvailableModels`
 - `selectModelForThread`
+- `listSkills`
+- `writeSkillConfig`
+- `invokeSkill`
 - `createCodexJob`
 - `getCodexJob`
 - `getCodexJobEvents`
 - `postCodexJobApproval`
 - `getCodexJobResult`
+
+Admin context/model endpoints operate in Codex-only mode:
+- Gateway proxies project/thread/config/model queries through Codex app-server / Codex CLI interfaces.
+- Gateway does not use local SQL/filesystem as source-of-truth for these flows.
 
 ### Import from URL
 
