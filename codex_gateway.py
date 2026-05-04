@@ -505,6 +505,15 @@ def _is_no_rollout_error(detail: object) -> bool:
     return "no rollout found" in lowered or "thread not found" in lowered
 
 
+def _is_payload_too_big_error(detail: object) -> bool:
+    try:
+        text = json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        text = str(detail)
+    lowered = text.lower()
+    return "message too big" in lowered or "1009" in lowered or "frame with" in lowered
+
+
 async def _app_server_rpc(
     method: str,
     params: dict | None = None,
@@ -550,7 +559,12 @@ async def _app_server_rpc(
             )
         )
         while True:
-            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            except TimeoutError as exc:
+                raise HTTPException(status_code=504, detail="Timeout waiting for app-server initialize response") from exc
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"App-server websocket receive failed: {exc}") from exc
             msg = json.loads(raw)
             if msg.get("id") == 1:
                 if "error" in msg:
@@ -569,7 +583,12 @@ async def _app_server_rpc(
             )
         )
         while True:
-            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            except TimeoutError as exc:
+                raise HTTPException(status_code=504, detail=f"Timeout waiting app-server response for {method}") from exc
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"App-server websocket receive failed: {exc}") from exc
             msg = json.loads(raw)
             if msg.get("id") == 2:
                 if "error" in msg:
@@ -917,6 +936,8 @@ async def _run_codex_via_app_server_ws(
             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         except TimeoutError as exc:
             raise HTTPException(status_code=504, detail="Timeout waiting for app-server message") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"App-server websocket receive failed: {exc}") from exc
         try:
             return json.loads(raw)
         except Exception as exc:
@@ -1015,7 +1036,11 @@ async def _run_codex_via_app_server_ws(
             thread_req = {
                 "id": thread_req_id,
                 "method": "thread/resume",
-                "params": {"threadId": payload.session_id},
+                "params": {
+                    "threadId": payload.session_id,
+                    # Avoid huge resume payloads with full turns history.
+                    "excludeTurns": True,
+                },
             }
         else:
             params: dict = {}
@@ -1574,20 +1599,14 @@ async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
             app_server_bearer_token=payload.app_server_bearer_token,
         )
         if latest_thread_id:
-            resume_req = CodexRequest(
-                backend="app_server_ws",
-                kind="resume",
-                session_id=latest_thread_id,
-                prompt=None,
-                use_exec=False,
-                app_server_url=payload.app_server_url,
-                app_server_bearer_token=payload.app_server_bearer_token,
-                include_events=False,
-                max_events=0,
-                diff_mode="off",
-            )
             try:
-                resumed = await _execute_codex_with_updates(resume_req, on_update=None, on_server_request=None)
+                # First try to restore full context (including turns).
+                resumed = await _app_server_rpc(
+                    "thread/resume",
+                    {"threadId": latest_thread_id, "excludeTurns": False},
+                    app_server_url=payload.app_server_url,
+                    app_server_bearer_token=payload.app_server_bearer_token,
+                )
                 thread = resumed.get("thread") if isinstance(resumed, dict) else None
                 if isinstance(thread, dict):
                     thread_id = thread.get("id")
@@ -1601,12 +1620,54 @@ async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
                             "thread_status": "resumed",
                             "interaction_mode": payload.interaction_mode,
                             "thread": thread,
-                            "message_for_client": "Project selected. Existing thread resumed.",
+                            "message_for_client": "Project selected. Existing thread resumed with full context.",
                         }
                 stale_thread_id = latest_thread_id
             except HTTPException as exc:
                 if _is_no_rollout_error(exc.detail):
                     stale_thread_id = latest_thread_id
+                elif _is_payload_too_big_error(exc.detail):
+                    # Automatic fallback: resume metadata only, then fetch last 10 turns.
+                    try:
+                        resumed_meta = await _app_server_rpc(
+                            "thread/resume",
+                            {"threadId": latest_thread_id, "excludeTurns": True},
+                            app_server_url=payload.app_server_url,
+                            app_server_bearer_token=payload.app_server_bearer_token,
+                        )
+                        thread = resumed_meta.get("thread") if isinstance(resumed_meta, dict) else None
+                        if not isinstance(thread, dict):
+                            raise HTTPException(status_code=502, detail="app-server did not return thread object")
+                        turns_resp = await _app_server_rpc(
+                            "thread/turns/list",
+                            {"threadId": latest_thread_id, "limit": 10, "sortDirection": "desc"},
+                            app_server_url=payload.app_server_url,
+                            app_server_bearer_token=payload.app_server_bearer_token,
+                        )
+                        turns = turns_resp.get("data", []) if isinstance(turns_resp.get("data"), list) else []
+                        thread["turns"] = turns
+                        thread_id = thread.get("id")
+                        if isinstance(thread_id, str) and thread_id:
+                            reused_thread_id = thread_id
+                            return {
+                                "status": "ok",
+                                "project": project,
+                                "created_project": bool(project_info.get("created")),
+                                "thread_id": reused_thread_id,
+                                "thread_status": "resumed",
+                                "interaction_mode": payload.interaction_mode,
+                                "thread": thread,
+                                "resume_context_mode": "limited_last_10_turns",
+                                "message_for_client": (
+                                    "Project selected. Existing thread resumed with limited context "
+                                    "(last 10 turns) after full-context resume overflow."
+                                ),
+                            }
+                    except HTTPException as exc2:
+                        if _is_no_rollout_error(exc2.detail):
+                            stale_thread_id = latest_thread_id
+                        else:
+                            raise
                 else:
                     raise
 

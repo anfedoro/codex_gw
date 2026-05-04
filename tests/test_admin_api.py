@@ -102,11 +102,13 @@ def test_switch_project_context_falls_back_to_new_thread_on_missing_rollout(tmp_
     async def fake_latest(cwd, **kwargs):
         return "thread_old"
 
-    async def fake_execute(payload, on_update, on_server_request):
-        raise codex_gateway.HTTPException(
-            status_code=502,
-            detail={"message": "app-server error", "cause": "no rollout found for thread id thread_old"},
-        )
+    async def fake_rpc(method, params=None, **kwargs):
+        if method == "thread/resume":
+            raise codex_gateway.HTTPException(
+                status_code=502,
+                detail={"message": "app-server error", "cause": "no rollout found for thread id thread_old"},
+            )
+        raise AssertionError(method)
 
     async def fake_create_thread(payload):
         return {
@@ -124,7 +126,7 @@ def test_switch_project_context_falls_back_to_new_thread_on_missing_rollout(tmp_
         }
 
     monkeypatch.setattr(codex_gateway, "_latest_thread_id_for_cwd", fake_latest)
-    monkeypatch.setattr(codex_gateway, "_execute_codex_with_updates", fake_execute)
+    monkeypatch.setattr(codex_gateway, "_app_server_rpc", fake_rpc)
     monkeypatch.setattr(codex_gateway, "create_project", fake_create_project)
     monkeypatch.setattr(codex_gateway, "create_thread", fake_create_thread)
 
@@ -140,6 +142,53 @@ def test_switch_project_context_falls_back_to_new_thread_on_missing_rollout(tmp_
     assert body["thread_status"] == "created_new"
     assert body["thread_id"] == "thread_new"
     assert body["stale_thread_id"] == "thread_old"
+
+
+def test_switch_project_context_resumes_with_limited_turns_on_payload_overflow(tmp_path, monkeypatch) -> None:
+    project = tmp_path / "proj"
+
+    async def fake_latest(cwd, **kwargs):
+        return "thread_old"
+
+    async def fake_create_project(payload):
+        return {
+            "status": "ok",
+            "created": False,
+            "project": {"cwd": str(project.resolve()), "name": "proj", "thread_count": 0, "last_updated_at": None},
+        }
+
+    async def fake_rpc(method, params=None, **kwargs):
+        if method == "thread/resume" and params and params.get("excludeTurns") is False:
+            raise codex_gateway.HTTPException(
+                status_code=502,
+                detail="App-server websocket receive failed: sent 1009 (message too big) frame with 1300000 bytes",
+            )
+        if method == "thread/resume" and params and params.get("excludeTurns") is True:
+            return {"thread": {"id": "thread_old", "cwd": str(project.resolve())}}
+        if method == "thread/turns/list":
+            assert params["threadId"] == "thread_old"
+            assert params["limit"] == 10
+            return {"data": [{"id": "turn_1"}, {"id": "turn_2"}]}
+        raise AssertionError((method, params))
+
+    monkeypatch.setattr(codex_gateway, "_latest_thread_id_for_cwd", fake_latest)
+    monkeypatch.setattr(codex_gateway, "_app_server_rpc", fake_rpc)
+    monkeypatch.setattr(codex_gateway, "create_project", fake_create_project)
+
+    body = asyncio.run(
+        codex_gateway.switch_project_context(
+            SwitchProjectContextRequest(
+                project_path=str(project),
+                thread_policy="reuse_latest",
+            )
+        )
+    )
+    assert body["status"] == "ok"
+    assert body["thread_status"] == "resumed"
+    assert body["thread_id"] == "thread_old"
+    assert body["resume_context_mode"] == "limited_last_10_turns"
+    assert isinstance(body["thread"]["turns"], list)
+    assert len(body["thread"]["turns"]) == 2
 
 
 def test_select_model_for_thread_creates_new_thread_with_selected_model(monkeypatch) -> None:

@@ -51,6 +51,7 @@ Execution defaults:
   1) initialize admin context (`switchProjectContext` preferred; fallback to `listProjects`/`createProject`, `listThreads`/`createThread`),
   2) run execution job flow.
 - For requests like "choose/open project or thread", call admin actions first instead of asking user for data that can be fetched from API.
+- If full-context resume fails because payload is too large, automatically retry resume in metadata-only mode and load last 10 turns for context.
 - If resume fails with "no rollout found", immediately create a new thread in the selected project and continue without asking the user for manual thread recovery.
 - For long tasks, use async mode:
   1) call `createCodexJob`,
