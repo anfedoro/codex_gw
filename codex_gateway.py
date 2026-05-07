@@ -78,6 +78,7 @@ APPROVAL_POLL_INTERVAL_SECONDS = _CONFIG.approval_poll_interval_seconds
 JOB_EVENT_BUFFER_MAX_ITEMS = int(os.environ.get("GATEWAY_JOB_EVENT_BUFFER_MAX_ITEMS", "400"))
 JOBS: dict[str, dict] = {}
 JOB_COUNTER = itertools.count(1)
+TERMINAL_JOB_NOTICES: dict[str, dict] = {}
 PUBLIC_SCHEMA_ENABLED = _CONFIG.public_schema_enabled
 SCHEMA_IMPORT_KEY = _CONFIG.schema_import_key
 SCHEMA_IMPORT_KEY_PARAM = _CONFIG.schema_import_key_param
@@ -105,6 +106,7 @@ PROGRESS_MILESTONE_METHODS = {
     "job/completed",
     "job/failed",
 }
+ACTIVE_JOB_STATUSES = {"queued", "running", "waiting_approval"}
 
 
 def _configure_logging() -> None:
@@ -126,6 +128,80 @@ def _configure_logging() -> None:
         logging.getLevelName(level),
         DEBUG_MODE,
         LOG_FILE or "<stdout-only>",
+    )
+
+
+def _register_terminal_job_notice(job: dict) -> None:
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return
+    status = str(job.get("status") or "")
+    if status not in {"completed", "failed"}:
+        return
+    TERMINAL_JOB_NOTICES[job_id] = {
+        "job_id": job_id,
+        "thread_id": job.get("thread_id"),
+        "status": status,
+        "event_seq": int(job.get("event_seq", 0) or 0),
+        "created_at": _to_iso(job_now()),
+    }
+
+
+def _peek_terminal_job_notices(*, limit: int = 5) -> list[dict]:
+    if limit <= 0:
+        return []
+    items = list(TERMINAL_JOB_NOTICES.values())
+    return items[:limit]
+
+
+def _drain_job_events(job: dict) -> None:
+    job["last_drained_seq"] = int(job.get("event_seq", 0) or 0)
+    events = job.get("events")
+    if isinstance(events, list):
+        events.clear()
+
+
+def _ack_terminal_job_notices(notices: list[dict]) -> None:
+    for notice in notices:
+        job_id = str(notice.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        job = JOBS.get(job_id)
+        if isinstance(job, dict):
+            _drain_job_events(job)
+        TERMINAL_JOB_NOTICES.pop(job_id, None)
+
+
+def _attach_terminal_notices_to_response(path: str, response: JSONResponse) -> JSONResponse:
+    if path in {"/gpt-action-schema.json", "/openapi.json", "/docs", "/redoc"}:
+        return response
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return response
+    body = response.body
+    if not body:
+        return response
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        return response
+    if not isinstance(payload, dict):
+        return response
+
+    notices = _peek_terminal_job_notices(limit=5)
+    if not notices:
+        return response
+    payload["gateway_notifications"] = {
+        "terminal_jobs": notices,
+    }
+    _ack_terminal_job_notices(notices)
+
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    return JSONResponse(
+        status_code=response.status_code,
+        content=payload,
+        headers=headers,
     )
 
 
@@ -194,6 +270,8 @@ async def require_bearer_api_key(request: Request, call_next):
             )
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     response = await call_next(request)
+    if isinstance(response, JSONResponse):
+        response = _attach_terminal_notices_to_response(request.url.path, response)
     if LOG_REQUESTS or DEBUG_MODE:
         duration_ms = (time.monotonic() - started) * 1000.0
         LOGGER.info(
@@ -374,6 +452,10 @@ def _thread_pending_jobs(thread_id: str, *, exclude_job_id: str | None = None) -
             continue
         if str(job.get("thread_id") or "") != str(thread_id):
             continue
+        if str(job.get("status") or "") not in ACTIVE_JOB_STATUSES:
+            # Completed/failed jobs may still have undrained raw events,
+            # but they must not block starting a new execution job.
+            continue
         pending = _job_pending_events_count(job)
         if pending <= 0:
             continue
@@ -414,6 +496,25 @@ def _assert_job_thread(job: dict, thread_id: str | None) -> None:
                 "actual_thread_id": actual,
             },
         )
+
+
+def _require_resumed_thread_for_job(payload: CodexRequest) -> None:
+    if payload.backend != "app_server_ws":
+        return
+    if payload.kind == "resume" and payload.session_id:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": "Execution job requires an active thread context",
+            "required_payload": {
+                "backend": "app_server_ws",
+                "kind": "resume",
+                "session_id": "<thread_id>",
+            },
+            "hint": "Select or create thread first, then start job in resume mode.",
+        },
+    )
 
 
 def _resolve_repo_path(path: str) -> Path:
@@ -803,6 +904,21 @@ def _append_progress_milestone(job: dict, method: str, now_ts: int) -> None:
     )
     if len(items) > 100:
         del items[: len(items) - 100]
+
+
+def _build_progress_delta(job: dict, since_seq: int, max_items: int) -> dict:
+    items = list(job.get("progress_items", []))
+    current_seq = int(job.get("progress_seq", 0) or 0)
+    delta = [item for item in items if int(item.get("seq", 0) or 0) > since_seq]
+    truncated = len(delta) > max_items
+    if truncated:
+        delta = delta[-max_items:]
+    return {
+        "since_seq": since_seq,
+        "current_seq": current_seq,
+        "items": delta,
+        "truncated": truncated,
+    }
 
 
 def _run_command(cmd: list[str], cwd: Path, timeout: int) -> dict:
@@ -2041,6 +2157,7 @@ async def _run_job(job_id: str) -> None:
         job["next_poll_after"] = ts
         job["last_event_method"] = "job/completed" if job["status"] == "completed" else "job/failed"
         _notify_job_update(job["last_event_method"], wake_poll=True)
+        _register_terminal_job_notice(job)
         done_event: asyncio.Event = job["done_event"]
         if not done_event.is_set():
             done_event.set()
@@ -2096,10 +2213,10 @@ def _create_job(payload: CodexRequest) -> dict:
 @app.post("/codex/jobs")
 async def create_codex_job(request: CodexJobRequest) -> dict:
     payload = request.payload
-    if payload.backend == "app_server_ws" and payload.kind == "resume" and payload.session_id:
-        pending_jobs = _thread_pending_jobs(payload.session_id)
-        if pending_jobs:
-            _raise_pending_events_conflict(payload.session_id, pending_jobs)
+    _require_resumed_thread_for_job(payload)
+    pending_jobs = _thread_pending_jobs(payload.session_id)
+    if pending_jobs:
+        _raise_pending_events_conflict(payload.session_id, pending_jobs)
     job = _create_job(request.payload)
     return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
 
@@ -2148,6 +2265,9 @@ async def post_codex_job_approval(
 async def get_codex_job(
     job_id: str,
     thread_id: str | None = Query(default=None, description="Optional thread correlation guard"),
+    since_progress_seq: int = Query(default=0, ge=0, description="Return milestones with seq > this value"),
+    max_progress_items: int = Query(default=5, ge=1, le=20, description="Maximum milestones to return in delta"),
+    wait_seconds: int | None = Query(default=None, ge=0, le=30, description="Optional long-poll wait timeout"),
 ) -> dict:
     prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
     job = JOBS.get(job_id)
@@ -2157,19 +2277,23 @@ async def get_codex_job(
     now = job_now()
     if job["status"] in {"queued", "running"}:
         next_poll_after = int(job.get("next_poll_after", 0) or 0)
-        if JOB_LONG_POLL_ENABLED and next_poll_after > now:
-            wait_seconds = min(next_poll_after - now, JOB_LONG_POLL_MAX_SECONDS)
-            if wait_seconds > 0:
+        has_new_progress = int(job.get("progress_seq", 0) or 0) > since_progress_seq
+        desired_wait = wait_seconds if wait_seconds is not None else JOB_LONG_POLL_MAX_SECONDS
+        wait_timeout = min(max(0, int(desired_wait)), JOB_LONG_POLL_MAX_SECONDS)
+        if JOB_LONG_POLL_ENABLED and wait_timeout > 0 and not has_new_progress:
+            if next_poll_after > now:
+                wait_timeout = min(wait_timeout, next_poll_after - now)
+            if wait_timeout > 0:
                 notify_event: asyncio.Event | None = job.get("notify_event")
                 if notify_event:
                     try:
-                        await asyncio.wait_for(notify_event.wait(), timeout=wait_seconds)
+                        await asyncio.wait_for(notify_event.wait(), timeout=wait_timeout)
                     except TimeoutError:
                         pass
                     finally:
                         notify_event.clear()
                 else:
-                    await asyncio.sleep(wait_seconds)
+                    await asyncio.sleep(wait_timeout)
                 prune_jobs(JOBS, ttl_seconds=JOB_TTL_SECONDS, max_items=JOB_MAX_ITEMS)
                 refreshed = JOBS.get(job_id)
                 if not refreshed:
@@ -2180,7 +2304,22 @@ async def get_codex_job(
         if next_poll_after <= now:
             job["next_poll_after"] = now + JOB_POLL_AFTER_SECONDS
             job["updated_at"] = now
-    return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
+    out = format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
+    progress_delta = _build_progress_delta(job, since_progress_seq, max_progress_items)
+    out["progress_delta"] = progress_delta
+    if not progress_delta["items"] and job["status"] in {"queued", "running"}:
+        started_at = int(job.get("started_at") or job.get("created_at") or now)
+        elapsed = max(0, now - started_at)
+        out["heartbeat"] = {
+            "alive": True,
+            "status": job["status"],
+            "elapsed_sec": elapsed,
+            "elapsed_label": _format_elapsed_label(elapsed),
+            "message": "Job is still running, no significant status change.",
+        }
+    else:
+        out["heartbeat"] = None
+    return out
 
 
 @app.get("/codex/jobs/{job_id}/result")

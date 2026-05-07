@@ -6,6 +6,8 @@ import pytest
 
 import codex_gateway
 from cgw.models import (
+    CodexJobRequest,
+    CodexRequest,
     ProjectCreateRequest,
     SkillConfigWriteRequest,
     SkillInvokeRequest,
@@ -189,6 +191,96 @@ def test_switch_project_context_resumes_with_limited_turns_on_payload_overflow(t
     assert body["resume_context_mode"] == "limited_last_10_turns"
     assert isinstance(body["thread"]["turns"], list)
     assert len(body["thread"]["turns"]) == 2
+
+
+def test_create_codex_job_requires_resumed_thread_context() -> None:
+    with pytest.raises(codex_gateway.HTTPException) as exc:
+        asyncio.run(
+            codex_gateway.create_codex_job(
+                CodexJobRequest(
+                    payload=CodexRequest(
+                        backend="app_server_ws",
+                        kind="new",
+                        prompt="Do task",
+                        cwd="/tmp",
+                    )
+                )
+            )
+        )
+    assert exc.value.status_code == 409
+    assert "active thread context" in str(exc.value.detail)
+
+
+def test_get_codex_job_returns_heartbeat_and_progress_delta() -> None:
+    old_jobs = codex_gateway.JOBS
+    old_long_poll = codex_gateway.JOB_LONG_POLL_ENABLED
+    now = codex_gateway.job_now()
+    try:
+        codex_gateway.JOB_LONG_POLL_ENABLED = False
+        codex_gateway.JOBS = {
+            "job_1": {
+                "job_id": "job_1",
+                "status": "running",
+                "created_at": now - 20,
+                "started_at": now - 18,
+                "updated_at": now - 1,
+                "completed_at": None,
+                "thread_id": "thread_1",
+                "next_poll_after": now + 30,
+                "last_event_method": "job/running",
+                "last_update_text": "Working...",
+                "approval_required": False,
+                "approval_request": None,
+                "approval_policies": [],
+                "diff_mode": "off",
+                "diff_live_available": False,
+                "diff_live_version": 0,
+                "diff_final_available": False,
+                "diff_hint": None,
+                "diagnostic_diff_available": False,
+                "event_seq": 0,
+                "last_drained_seq": 0,
+                "progress_seq": 2,
+                "progress_items": [
+                    {"seq": 1, "kind": "job/running", "elapsed_sec": 0, "elapsed_label": "0s", "text": "started"},
+                    {"seq": 2, "kind": "turn/completed", "elapsed_sec": 10, "elapsed_label": "10s", "text": "step"},
+                ],
+                "notify_event": asyncio.Event(),
+                "done_event": asyncio.Event(),
+                "error": None,
+                "result": None,
+            }
+        }
+
+        fresh = asyncio.run(
+            codex_gateway.get_codex_job(
+                "job_1",
+                thread_id=None,
+                since_progress_seq=0,
+                max_progress_items=1,
+                wait_seconds=0,
+            )
+        )
+        assert fresh["progress_delta"]["current_seq"] == 2
+        assert len(fresh["progress_delta"]["items"]) == 1
+        assert fresh["progress_delta"]["truncated"] is True
+        assert fresh["heartbeat"] is None
+
+        idle = asyncio.run(
+            codex_gateway.get_codex_job(
+                "job_1",
+                thread_id=None,
+                since_progress_seq=2,
+                max_progress_items=5,
+                wait_seconds=0,
+            )
+        )
+        assert idle["progress_delta"]["items"] == []
+        assert idle["heartbeat"]["alive"] is True
+        assert idle["heartbeat"]["status"] == "running"
+    finally:
+        codex_gateway.JOB_LONG_POLL_ENABLED = old_long_poll
+        codex_gateway.JOBS = old_jobs
 
 
 def test_select_model_for_thread_creates_new_thread_with_selected_model(monkeypatch) -> None:

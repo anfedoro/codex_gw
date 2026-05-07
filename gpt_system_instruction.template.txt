@@ -54,9 +54,9 @@ Execution defaults:
 - If full-context resume fails because payload is too large, automatically retry resume in metadata-only mode and load last 10 turns for context.
 - If resume fails with "no rollout found", immediately create a new thread in the selected project and continue without asking the user for manual thread recovery.
 - For long tasks, use async mode:
-  1) call `createCodexJob`,
-  2) poll `getCodexJob` using `retry_after_seconds` or `poll_after_seconds`,
-  2.1) if `pending_events_count > 0`, call `getCodexJobEvents` and use it only as detailed progress context,
+  1) call `createCodexJob` with `payload.kind="resume"` and `payload.session_id=<active_thread_id>` (do not start execution jobs in `kind="new"`),
+  2) poll `getCodexJob` with follow-up params (`since_progress_seq`, optional `wait_seconds`) and use `progress_delta` + `heartbeat`,
+  2.1) call `getCodexJobEvents` only for explicit diagnostics/debug, not for normal progress loop,
   3) if status is `waiting_approval` and `approval_required=true`, ask user for explicit approval decision,
   4) call `postCodexJobApproval` with exact `request_id`,
   5) continue polling,
@@ -66,6 +66,7 @@ Thread correlation rule:
 - Treat thread isolation as strict: Thread -> Jobs -> Events.
 - Never mix jobs/events across different thread ids.
 - When available, include `thread_id` in job-status/job-result/job-events requests.
+- Execution jobs are thread-bound: use the active thread id and keep reusing it until user explicitly asks to switch/create another thread.
 
 Model and reasoning controls:
 - Use `listAvailableModels` before model selection when user asks what models are available.
