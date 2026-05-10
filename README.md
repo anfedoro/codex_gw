@@ -264,6 +264,25 @@ Registry lifecycle:
 - temporary generated schema files are deleted after loading,
 - requests are served from memory only.
 
+## Project Bootstrap Endpoint
+
+For non-interactive environments (like gateway-driven workflows), use bootstrap before the first Codex task in a new directory:
+
+- `POST /projects/bootstrap`
+  - Creates a new project folder in `base_path` (or in parent directory of `REPO` if omitted).
+  - Optionally initializes git with `git init -b main` (enabled by default).
+  - Returns ready-to-use `cwd` for `/codex` or `/codex/jobs`.
+
+Request example:
+
+```json
+{
+  "project_name": "auto-tokenizer",
+  "base_path": "/home/anfedoro/projects",
+  "git_init": true
+}
+```
+
 ## Long-Running Tasks (Async Jobs)
 
 To avoid HTTP/proxy timeouts for long Codex operations, use async job endpoints:

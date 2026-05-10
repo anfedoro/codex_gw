@@ -113,3 +113,18 @@ class SkillInvokeRequest(BaseModel):
     cwd: str | None = None
     app_server_url: str | None = None
     app_server_bearer_token: str | None = None
+
+class ProjectBootstrapRequest(BaseModel):
+    project_name: str = Field(
+        min_length=1,
+        max_length=120,
+        description="Folder name for the new project (single path segment).",
+    )
+    base_path: str | None = Field(
+        default=None,
+        description="Existing parent directory where the project folder will be created. Defaults to REPO parent.",
+    )
+    git_init: bool = Field(
+        default=True,
+        description="Initialize a git repository (`git init -b main`) in the new folder.",
+    )

@@ -764,6 +764,65 @@
         },
         "additionalProperties": true
       },
+      "ProjectBootstrapRequest": {
+        "type": "object",
+        "properties": {
+          "project_name": {
+            "type": "string"
+          },
+          "base_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_init": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "project_name"
+        ],
+        "additionalProperties": false
+      },
+      "ProjectBootstrapResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "project_name": {
+            "type": "string"
+          },
+          "base_path": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "git_initialized": {
+            "type": "boolean"
+          },
+          "git": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "next_step_hint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "project_name",
+          "cwd",
+          "git_initialized"
+        ],
+        "additionalProperties": true
+      },
       "ThreadItem": {
         "type": "object",
         "properties": {
@@ -1747,6 +1806,40 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/projects/bootstrap": {
+      "post": {
+        "operationId": "bootstrapProject",
+        "summary": "Create a new project directory and optionally initialize git",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectBootstrapRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Project bootstrapped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectBootstrapResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "409": {
+            "description": "Project already exists"
           }
         }
       }

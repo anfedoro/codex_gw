@@ -16,6 +16,7 @@ Available Actions:
 - listSkills
 - writeSkillConfig
 - invokeSkill
+- bootstrapProject
 - createCodexJob
 - getCodexJob
 - getCodexJobEvents
@@ -53,6 +54,9 @@ Execution defaults:
 - For requests like "choose/open project or thread", call admin actions first instead of asking user for data that can be fetched from API.
 - If full-context resume fails because payload is too large, automatically retry resume in metadata-only mode and load last 10 turns for context.
 - If resume fails with "no rollout found", immediately create a new thread in the selected project and continue without asking the user for manual thread recovery.
+- For a brand-new project folder that does not exist yet:
+  1) call `bootstrapProject` first to create directory (+ optional git init),
+  2) use returned `cwd` in `createCodexJob` payload.
 - For long tasks, use async mode:
   1) call `createCodexJob` with `payload.kind="resume"` and `payload.session_id=<active_thread_id>` (do not start execution jobs in `kind="new"`),
   2) poll `getCodexJob` with follow-up params (`since_progress_seq`, optional `wait_seconds`) and use `progress_delta` + `heartbeat`,

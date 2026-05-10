@@ -13,6 +13,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ from cgw.models import (
     CodexJobRequest,
     CodexRequest,
     ProjectCreateRequest,
+    ProjectBootstrapRequest,
     SkillConfigWriteRequest,
     SkillInvokeRequest,
     SkillsListRequest,
@@ -1379,6 +1381,66 @@ async def create_project(payload: ProjectCreateRequest) -> dict:
             "Gateway does not mutate filesystem in Codex-only mode. "
             "Project path is registered as context through Codex runtime."
         ),
+    }
+
+
+@app.post("/projects/bootstrap")
+async def bootstrap_project(payload: ProjectBootstrapRequest) -> dict:
+    name = payload.project_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="project_name is required")
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="project_name must be a single folder name")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise HTTPException(
+            status_code=400,
+            detail="project_name contains unsupported characters; allowed: letters, digits, dot, underscore, hyphen",
+        )
+
+    if payload.base_path:
+        base_path = Path(payload.base_path).expanduser().resolve()
+    else:
+        base_path = REPO.parent.resolve()
+
+    if not base_path.exists() or not base_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"base_path does not exist or is not a directory: {base_path}")
+
+    project_path = (base_path / name).resolve()
+    try:
+        project_path.relative_to(base_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="project path escapes base_path") from exc
+
+    if project_path.exists():
+        raise HTTPException(status_code=409, detail=f"project already exists: {project_path}")
+
+    try:
+        project_path.mkdir(parents=True, exist_ok=False)
+    except Exception as exc:
+        LOGGER.exception("failed to create project directory base_path=%s project_path=%s", base_path, project_path)
+        raise HTTPException(status_code=500, detail=f"failed to create project directory: {exc}") from exc
+
+    git_result: dict | None = None
+    if payload.git_init:
+        git_result = _run_command(["git", "init", "-b", "main"], project_path, timeout=30)
+        if git_result.get("exit_code") != 0:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "project folder created but git init failed",
+                    "project_path": str(project_path),
+                    "git": git_result,
+                },
+            )
+
+    return {
+        "status": "ok",
+        "project_name": name,
+        "base_path": str(base_path),
+        "cwd": str(project_path),
+        "git_initialized": bool(payload.git_init),
+        "git": git_result,
+        "next_step_hint": "Use this cwd in /codex or /codex/jobs payload for follow-up tasks.",
     }
 
 
