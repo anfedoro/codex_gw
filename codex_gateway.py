@@ -111,6 +111,86 @@ PROGRESS_MILESTONE_METHODS = {
 ACTIVE_JOB_STATUSES = {"queued", "running", "waiting_approval"}
 
 
+def _capability_tools() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "name": "project.bootstrap",
+            "description": (
+                "Create a new project directory and optionally initialize git. "
+                "Use when target project folder does not exist yet. "
+                "Confirmation: required for write/admin operations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_name": {"type": "string"},
+                    "base_path": {"type": ["string", "null"]},
+                    "git_init": {"type": "boolean", "default": True},
+                },
+                "required": ["project_name"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "project.list",
+            "description": (
+                "List known projects from state DB. "
+                "Use before selecting working context if project path is unknown."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 200},
+                    "existing_only": {"type": "boolean", "default": True},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "thread.list",
+            "description": (
+                "List threads, optionally by cwd. "
+                "Use to select existing context before resume jobs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cwd": {"type": ["string", "null"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 100},
+                    "existing_only": {"type": "boolean", "default": True},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "thread.create",
+            "description": (
+                "Create a new thread context without running a turn. "
+                "Use when no suitable thread exists or explicit new thread is requested. "
+                "Confirmation: required."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cwd": {"type": ["string", "null"]},
+                    "model": {"type": ["string", "null"]},
+                    "reasoning_effort": {"type": ["string", "null"], "enum": ["low", "medium", "high", "xhigh"]},
+                    "sandbox": {"type": ["string", "null"]},
+                    "approvals": {"type": ["string", "null"]},
+                    "app_server_url": {"type": ["string", "null"]},
+                    "app_server_bearer_token": {"type": ["string", "null"]},
+                    "interaction_mode": {"type": "string", "enum": ["execution", "planning"], "default": "execution"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
 def _configure_logging() -> None:
     level_name = "DEBUG" if DEBUG_MODE else LOG_LEVEL
     level = getattr(logging, level_name, logging.INFO)
@@ -1256,6 +1336,15 @@ async def healthz() -> dict:
         "protocol_schema_count": int(PROTOCOL_REGISTRY.get("schema_count") or 0),
         "protocol_registry_hash": PROTOCOL_REGISTRY.get("registry_hash"),
         "protocol_source": PROTOCOL_REGISTRY.get("source"),
+    }
+
+
+@app.get("/capabilities")
+async def get_capabilities() -> dict:
+    return {
+        "version": "2026-05-10",
+        "tools": _capability_tools(),
+        "notes": "Use only listed tools and always re-check capabilities before planning writes.",
     }
 
 

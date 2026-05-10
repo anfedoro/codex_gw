@@ -1417,6 +1417,29 @@
           "schema"
         ],
         "additionalProperties": true
+      },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "tools"
+        ],
+        "additionalProperties": true
       }
     }
   },
@@ -1444,337 +1467,17 @@
         }
       }
     },
-    "/projects": {
+    "/capabilities": {
       "get": {
-        "operationId": "listProjects",
-        "summary": "List available projects from state DB",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 5000,
-              "default": 200
-            }
-          },
-          {
-            "name": "existing_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true
-            }
-          }
-        ],
+        "operationId": "getCapabilities",
+        "summary": "Get dynamic function catalog for current gateway runtime",
         "responses": {
           "200": {
-            "description": "Projects list",
+            "description": "Dynamic capabilities",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectsResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "operationId": "createProject",
-        "summary": "Create or validate a project directory",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProjectCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Project created or validated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectCreateResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/threads": {
-      "get": {
-        "operationId": "listThreads",
-        "summary": "List threads, optionally filtered by cwd",
-        "parameters": [
-          {
-            "name": "cwd",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 5000,
-              "default": 100
-            }
-          },
-          {
-            "name": "existing_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Threads list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ThreadsResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "operationId": "createThread",
-        "summary": "Create a new thread context without running a turn",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ThreadCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Thread created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ThreadCreateResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/threads/{thread_id}": {
-      "get": {
-        "operationId": "getThread",
-        "summary": "Get thread details by id",
-        "parameters": [
-          {
-            "name": "thread_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Thread details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ThreadByIdResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Thread not found"
-          }
-        }
-      }
-    },
-    "/context/switch": {
-      "post": {
-        "operationId": "switchProjectContext",
-        "summary": "Select project context and reuse/create thread with fallback",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SwitchProjectContextRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Context switched",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SwitchProjectContextResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/models": {
-      "get": {
-        "operationId": "listAvailableModels",
-        "summary": "Get runtime model catalog from Codex",
-        "responses": {
-          "200": {
-            "description": "Runtime model catalog",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AvailableModelsResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/threads/model": {
-      "post": {
-        "operationId": "selectModelForThread",
-        "summary": "Validate model and create a new thread in same project with selected model",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SelectThreadModelRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Model selected",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SelectThreadModelResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/skills": {
-      "get": {
-        "operationId": "listSkills",
-        "summary": "List available skills from Codex runtime",
-        "parameters": [
-          {
-            "name": "cwd",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "force_reload",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Skills list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SkillsListResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/skills/config": {
-      "post": {
-        "operationId": "writeSkillConfig",
-        "summary": "Enable or disable a skill by name or path",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SkillConfigWriteRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Skill config updated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SkillConfigWriteResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/skills/invoke": {
-      "post": {
-        "operationId": "invokeSkill",
-        "summary": "Invoke a skill in a specific thread using turn/start input item",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SkillInvokeRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Skill invocation started",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SkillInvokeResponse"
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
                 }
               }
             }
@@ -1806,40 +1509,6 @@
                 }
               }
             }
-          }
-        }
-      }
-    },
-    "/projects/bootstrap": {
-      "post": {
-        "operationId": "bootstrapProject",
-        "summary": "Create a new project directory and optionally initialize git",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProjectBootstrapRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Project bootstrapped",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectBootstrapResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "409": {
-            "description": "Project already exists"
           }
         }
       }
