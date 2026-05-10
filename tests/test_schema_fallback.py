@@ -27,7 +27,7 @@ def test_render_gpt_action_schema_uses_embedded_fallback(monkeypatch) -> None:
     assert rendered["servers"][0]["url"] == "https://example.test"
 
 
-def test_gpt_action_schema_operations_include_core_and_admin_flow() -> None:
+def test_gpt_action_schema_operations_include_core_and_dynamic_flow() -> None:
     parsed = json.loads(GPT_ACTION_SCHEMA_TEMPLATE_JSON)
     paths = parsed.get("paths", {})
     operation_ids = set()
@@ -43,17 +43,7 @@ def test_gpt_action_schema_operations_include_core_and_admin_flow() -> None:
 
     expected = {
         "getGatewayHealth",
-        "listProjects",
-        "createProject",
-        "listThreads",
-        "getThread",
-        "createThread",
-        "switchProjectContext",
-        "listAvailableModels",
-        "selectModelForThread",
-        "listSkills",
-        "writeSkillConfig",
-        "invokeSkill",
+        "getCapabilities",
         "createCodexJob",
         "getCodexJob",
         "getCodexJobEvents",
