@@ -199,28 +199,19 @@ Structured lifecycle logs:
 - `gpt_system_instruction.template.txt`: system instruction template for the Custom GPT.
 - `GET /gpt-system-instruction.txt`: returns current system instruction text used for GPT setup/testing.
 
-The imported GPT OpenAPI includes admin context actions plus execution job-flow:
+The imported GPT OpenAPI is intentionally minimal:
 - `getGatewayHealth`
-- `listProjects`
-- `createProject`
-- `listThreads`
-- `getThread`
-- `createThread`
-- `switchProjectContext`
-- `listAvailableModels`
-- `selectModelForThread`
-- `listSkills`
-- `writeSkillConfig`
-- `invokeSkill`
+- `getCapabilities`
 - `createCodexJob`
 - `getCodexJob`
 - `getCodexJobEvents`
 - `postCodexJobApproval`
 - `getCodexJobResult`
 
-Admin context/model endpoints operate in Codex-only mode:
-- Gateway proxies project/thread/config/model queries through Codex app-server / Codex CLI interfaces.
-- Gateway does not use local SQL/filesystem as source-of-truth for these flows.
+Dynamic capabilities:
+- `GET /capabilities` returns runtime function catalog in OpenAI function-style objects.
+- Capability rules are encoded in each function `description`.
+- GPT should refresh capabilities before write/admin steps and after recoverable errors.
 
 ### Import from URL
 
