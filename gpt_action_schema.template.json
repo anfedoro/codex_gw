@@ -1421,23 +1421,47 @@
       "CapabilitiesResponse": {
         "type": "object",
         "properties": {
+          "status": {
+            "type": "string"
+          },
           "version": {
             "type": "string"
           },
-          "tools": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": true
-            }
+          "request_patch": {
+            "type": "object",
+            "properties": {
+              "messages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            },
+            "required": [
+              "messages",
+              "tools"
+            ],
+            "additionalProperties": true
+          },
+          "tool_count": {
+            "type": "integer"
           },
           "notes": {
             "type": "string"
           }
         },
         "required": [
+          "status",
           "version",
-          "tools"
+          "request_patch"
         ],
         "additionalProperties": true
       }

@@ -39,6 +39,20 @@ def test_create_project_is_codex_only_and_does_not_touch_fs(tmp_path, monkeypatc
     assert not target.exists()
 
 
+def test_get_capabilities_returns_request_patch() -> None:
+    body = asyncio.run(codex_gateway.get_capabilities())
+    assert body["status"] == "ok"
+    assert isinstance(body["version"], str)
+    patch = body["request_patch"]
+    assert isinstance(patch.get("messages"), list)
+    assert isinstance(patch.get("tools"), list)
+    assert patch["messages"][0]["role"] == "developer"
+    assert "dynamic function catalog" in patch["messages"][0]["content"]
+    assert patch["tools"][0]["type"] == "function"
+    assert isinstance(patch["tools"][0]["function"], dict)
+    assert isinstance(body["tool_count"], int)
+
+
 def test_create_thread_uses_context_mode_and_model(monkeypatch) -> None:
     captured: dict = {}
 
