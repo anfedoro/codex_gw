@@ -207,6 +207,31 @@ def test_switch_project_context_resumes_with_limited_turns_on_payload_overflow(t
     assert len(body["thread"]["turns"]) == 2
 
 
+def test_thread_resume_falls_back_without_exclude_turns_on_capability_error(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_rpc(method, params=None, **kwargs):
+        calls.append({"method": method, "params": params or {}})
+        assert method == "thread/resume"
+        if "excludeTurns" in (params or {}):
+            raise codex_gateway.HTTPException(
+                status_code=502,
+                detail={
+                    "message": "invalid params",
+                    "cause": "thread/resume.excludeTurns requires experimentalApi capability",
+                },
+            )
+        return {"thread": {"id": "thread_ok"}}
+
+    monkeypatch.setattr(codex_gateway, "_app_server_rpc", fake_rpc)
+
+    result = asyncio.run(codex_gateway._app_server_thread_resume("thread_ok", exclude_turns=True))
+    assert result["thread"]["id"] == "thread_ok"
+    assert len(calls) == 2
+    assert calls[0]["params"] == {"threadId": "thread_ok", "excludeTurns": True}
+    assert calls[1]["params"] == {"threadId": "thread_ok"}
+
+
 def test_create_codex_job_auto_resolves_latest_thread_by_cwd(monkeypatch) -> None:
     captured: dict = {}
 

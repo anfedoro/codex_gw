@@ -764,6 +764,43 @@ def _is_payload_too_big_error(detail: object) -> bool:
     return "message too big" in lowered or "1009" in lowered or "frame with" in lowered
 
 
+def _is_exclude_turns_capability_error(detail: object) -> bool:
+    try:
+        text = json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        text = str(detail)
+    lowered = text.lower()
+    return "excludeturns" in lowered and ("experimentalapi" in lowered or "capability" in lowered)
+
+
+async def _app_server_thread_resume(
+    thread_id: str,
+    *,
+    exclude_turns: bool | None = None,
+    app_server_url: str | None = None,
+    app_server_bearer_token: str | None = None,
+) -> dict:
+    params: dict = {"threadId": thread_id}
+    if exclude_turns is not None:
+        params["excludeTurns"] = exclude_turns
+    try:
+        return await _app_server_rpc(
+            "thread/resume",
+            params,
+            app_server_url=app_server_url,
+            app_server_bearer_token=app_server_bearer_token,
+        )
+    except HTTPException as exc:
+        if exclude_turns is not None and _is_exclude_turns_capability_error(exc.detail):
+            return await _app_server_rpc(
+                "thread/resume",
+                {"threadId": thread_id},
+                app_server_url=app_server_url,
+                app_server_bearer_token=app_server_bearer_token,
+            )
+        raise
+
+
 async def _app_server_rpc(
     method: str,
     params: dict | None = None,
@@ -1326,16 +1363,34 @@ async def _run_codex_via_app_server_ws(
         try:
             thread_result = await wait_for_response(ws, thread_req_id)
         except HTTPException as exc:
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail={
-                    "message": "Failed waiting thread start/resume response from app-server",
-                    "request_id": thread_req_id,
-                    "events_seen": len(events),
-                    "last_event": events[-1] if events else None,
-                    "cause": exc.detail,
-                },
-            ) from exc
+            if payload.kind == "resume" and _is_exclude_turns_capability_error(exc.detail):
+                retry_req_id = next_id
+                next_id += 1
+                retry_req = {
+                    "id": retry_req_id,
+                    "method": "thread/resume",
+                    "params": {"threadId": payload.session_id},
+                }
+                await send(ws, retry_req)
+                try:
+                    thread_result = await wait_for_response(ws, retry_req_id)
+                except HTTPException as retry_exc:
+                    exc = retry_exc
+                else:
+                    exc = None
+            if exc is None:
+                pass
+            else:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={
+                        "message": "Failed waiting thread start/resume response from app-server",
+                        "request_id": thread_req_id,
+                        "events_seen": len(events),
+                        "last_event": events[-1] if events else None,
+                        "cause": exc.detail,
+                    },
+                ) from exc
         thread = thread_result.get("thread", {})
         thread_id = thread.get("id") or thread_id
         if not thread_id:
@@ -1941,9 +1996,9 @@ async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
         if latest_thread_id:
             try:
                 # First try to restore full context (including turns).
-                resumed = await _app_server_rpc(
-                    "thread/resume",
-                    {"threadId": latest_thread_id, "excludeTurns": False},
+                resumed = await _app_server_thread_resume(
+                    latest_thread_id,
+                    exclude_turns=False,
                     app_server_url=payload.app_server_url,
                     app_server_bearer_token=payload.app_server_bearer_token,
                 )
@@ -1969,9 +2024,9 @@ async def switch_project_context(payload: SwitchProjectContextRequest) -> dict:
                 elif _is_payload_too_big_error(exc.detail):
                     # Automatic fallback: resume metadata only, then fetch last 10 turns.
                     try:
-                        resumed_meta = await _app_server_rpc(
-                            "thread/resume",
-                            {"threadId": latest_thread_id, "excludeTurns": True},
+                        resumed_meta = await _app_server_thread_resume(
+                            latest_thread_id,
+                            exclude_turns=True,
                             app_server_url=payload.app_server_url,
                             app_server_bearer_token=payload.app_server_bearer_token,
                         )
