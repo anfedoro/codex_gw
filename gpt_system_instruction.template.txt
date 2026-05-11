@@ -39,7 +39,8 @@ Execution defaults:
 - Use only capabilities returned by `getCapabilities`. Do not invent methods.
 - Capability conditions are encoded in function `description`; obey them as execution policy.
 - For long tasks, use async mode:
-  1) call `createCodexJob` with `payload.kind="resume"` and `payload.session_id=<active_thread_id>` (do not start execution jobs in `kind="new"`),
+  1) call `createCodexJob` with current `payload.cwd` and active `payload.session_id` when known;
+     if `session_id` is missing, gateway must auto-open latest thread for cwd or auto-create new thread,
   2) poll `getCodexJob` with follow-up params (`since_progress_seq`, optional `wait_seconds`) and use `progress_delta` + `heartbeat`,
   2.1) call `getCodexJobEvents` only for explicit diagnostics/debug, not for normal progress loop,
   3) if status is `waiting_approval` and `approval_required=true`, ask user for explicit approval decision,

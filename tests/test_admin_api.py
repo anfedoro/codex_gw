@@ -207,7 +207,136 @@ def test_switch_project_context_resumes_with_limited_turns_on_payload_overflow(t
     assert len(body["thread"]["turns"]) == 2
 
 
-def test_create_codex_job_requires_resumed_thread_context() -> None:
+def test_create_codex_job_auto_resolves_latest_thread_by_cwd(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_latest(cwd, **kwargs):
+        assert cwd.endswith("/tmp/project-a")
+        return "thread_latest"
+
+    async def fake_create_thread(payload):
+        raise AssertionError("create_thread should not be called when latest thread exists")
+
+    def fake_create_job(payload):
+        captured["payload"] = payload
+        now = codex_gateway.job_now()
+        return {
+            "job_id": "job_1",
+            "status": "queued",
+            "created_at": now,
+            "started_at": None,
+            "updated_at": now,
+            "completed_at": None,
+            "thread_id": payload.session_id,
+            "next_poll_after": now,
+            "last_event_method": "job/queued",
+            "last_update_text": None,
+            "approval_required": False,
+            "approval_request": None,
+            "approval_policies": [],
+            "diff_mode": "off",
+            "diff_live_available": False,
+            "diff_live_version": 0,
+            "diff_final_available": False,
+            "diff_hint": None,
+            "diagnostic_diff_available": False,
+            "event_seq": 0,
+            "last_drained_seq": 0,
+            "progress_items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(codex_gateway, "_latest_thread_id_for_cwd", fake_latest)
+    monkeypatch.setattr(codex_gateway, "create_thread", fake_create_thread)
+    monkeypatch.setattr(codex_gateway, "_thread_pending_jobs", lambda thread_id: [])
+    monkeypatch.setattr(codex_gateway, "_create_job", fake_create_job)
+
+    body = asyncio.run(
+        codex_gateway.create_codex_job(
+            CodexJobRequest(
+                payload=CodexRequest(
+                    backend="app_server_ws",
+                    kind="new",
+                    cwd="/tmp/project-a",
+                    prompt="Do task",
+                )
+            )
+        )
+    )
+    assert body["thread_id"] == "thread_latest"
+    assert captured["payload"].kind == "resume"
+    assert captured["payload"].session_id == "thread_latest"
+
+
+def test_create_codex_job_auto_creates_thread_when_missing(monkeypatch) -> None:
+    captured: dict = {}
+    create_called: dict = {"ok": False}
+
+    async def fake_latest(cwd, **kwargs):
+        return None
+
+    async def fake_create_thread(payload):
+        create_called["ok"] = True
+        return {
+            "status": "ok",
+            "thread_id": "thread_new",
+            "thread": {"id": "thread_new", "cwd": payload.cwd},
+            "interaction_mode": payload.interaction_mode,
+        }
+
+    def fake_create_job(payload):
+        captured["payload"] = payload
+        now = codex_gateway.job_now()
+        return {
+            "job_id": "job_2",
+            "status": "queued",
+            "created_at": now,
+            "started_at": None,
+            "updated_at": now,
+            "completed_at": None,
+            "thread_id": payload.session_id,
+            "next_poll_after": now,
+            "last_event_method": "job/queued",
+            "last_update_text": None,
+            "approval_required": False,
+            "approval_request": None,
+            "approval_policies": [],
+            "diff_mode": "off",
+            "diff_live_available": False,
+            "diff_live_version": 0,
+            "diff_final_available": False,
+            "diff_hint": None,
+            "diagnostic_diff_available": False,
+            "event_seq": 0,
+            "last_drained_seq": 0,
+            "progress_items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(codex_gateway, "_latest_thread_id_for_cwd", fake_latest)
+    monkeypatch.setattr(codex_gateway, "create_thread", fake_create_thread)
+    monkeypatch.setattr(codex_gateway, "_thread_pending_jobs", lambda thread_id: [])
+    monkeypatch.setattr(codex_gateway, "_create_job", fake_create_job)
+
+    body = asyncio.run(
+        codex_gateway.create_codex_job(
+            CodexJobRequest(
+                payload=CodexRequest(
+                    backend="app_server_ws",
+                    kind="new",
+                    cwd="/tmp/project-b",
+                    prompt="Do task",
+                )
+            )
+        )
+    )
+    assert create_called["ok"] is True
+    assert body["thread_id"] == "thread_new"
+    assert captured["payload"].kind == "resume"
+    assert captured["payload"].session_id == "thread_new"
+
+
+def test_create_codex_job_requires_cwd_when_thread_missing() -> None:
     with pytest.raises(codex_gateway.HTTPException) as exc:
         asyncio.run(
             codex_gateway.create_codex_job(
@@ -216,13 +345,82 @@ def test_create_codex_job_requires_resumed_thread_context() -> None:
                         backend="app_server_ws",
                         kind="new",
                         prompt="Do task",
-                        cwd="/tmp",
                     )
                 )
             )
         )
-    assert exc.value.status_code == 409
-    assert "active thread context" in str(exc.value.detail)
+    assert exc.value.status_code == 400
+    assert "requires project cwd" in str(exc.value.detail)
+
+
+def test_post_codex_uses_resolved_thread_context_for_app_server_ws(tmp_path, monkeypatch) -> None:
+    project_dir = tmp_path / "proj_sync"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    captured: dict = {"resolved_called": False}
+
+    async def fake_resolve(payload):
+        captured["resolved_called"] = True
+        return payload.model_copy(
+            update={
+                "kind": "resume",
+                "session_id": "thread_sync_1",
+                "cwd": str(project_dir),
+            }
+        )
+
+    monkeypatch.setattr(codex_gateway, "_resolve_job_payload_thread_context", fake_resolve)
+    monkeypatch.setattr(codex_gateway, "_thread_pending_jobs", lambda thread_id: [])
+
+    def fake_create_job(payload):
+        captured["payload"] = payload
+        done = asyncio.Event()
+        done.set()
+        now = codex_gateway.job_now()
+        return {
+            "job_id": "job_sync_1",
+            "status": "completed",
+            "created_at": now,
+            "started_at": now,
+            "updated_at": now,
+            "completed_at": now,
+            "thread_id": payload.session_id,
+            "next_poll_after": now,
+            "last_event_method": "job/completed",
+            "last_update_text": None,
+            "approval_required": False,
+            "approval_request": None,
+            "approval_policies": [],
+            "diff_mode": "off",
+            "diff_live_available": False,
+            "diff_live_version": 0,
+            "diff_final_available": False,
+            "diff_hint": None,
+            "diagnostic_diff_available": False,
+            "event_seq": 0,
+            "last_drained_seq": 0,
+            "progress_items": [],
+            "error": None,
+            "result": {"status": "ok", "thread_id": payload.session_id},
+            "done_event": done,
+        }
+
+    monkeypatch.setattr(codex_gateway, "_create_job", fake_create_job)
+
+    body = asyncio.run(
+        codex_gateway.post_codex(
+            CodexRequest(
+                backend="app_server_ws",
+                kind="new",
+                cwd=str(project_dir),
+                prompt="sync task",
+            )
+        )
+    )
+    assert captured["resolved_called"] is True
+    assert captured["payload"].kind == "resume"
+    assert captured["payload"].session_id == "thread_sync_1"
+    assert body["status"] == "ok"
+    assert body["thread_id"] == "thread_sync_1"
 
 
 def test_get_codex_job_returns_heartbeat_and_progress_delta() -> None:

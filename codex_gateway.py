@@ -213,6 +213,8 @@ def _capability_developer_message() -> dict:
             "This is a dynamic function catalog for Codex Gateway control. "
             "Use only functions from tools list. "
             "Select function by user intent and each function description. "
+            "Always keep and pass current working project directory and thread id for actions. "
+            "If thread id is missing, gateway should auto-open latest thread for cwd or auto-create a new one. "
             "Do not invent missing functions. "
             "If requested capability is missing, report it and ask for an alternative."
         ),
@@ -608,22 +610,59 @@ def _assert_job_thread(job: dict, thread_id: str | None) -> None:
         )
 
 
-def _require_resumed_thread_for_job(payload: CodexRequest) -> None:
+async def _resolve_job_payload_thread_context(payload: CodexRequest) -> CodexRequest:
     if payload.backend != "app_server_ws":
-        return
-    if payload.kind == "resume" and payload.session_id:
-        return
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "message": "Execution job requires an active thread context",
-            "required_payload": {
-                "backend": "app_server_ws",
-                "kind": "resume",
-                "session_id": "<thread_id>",
-            },
-            "hint": "Select or create thread first, then start job in resume mode.",
-        },
+        return payload
+
+    resolved_cwd: str | None = None
+    if payload.cwd:
+        resolved_cwd = _resolve_project_cwd(payload.cwd)
+
+    # Explicit thread id has priority. Normalize kind/cwd and continue.
+    if payload.session_id:
+        updates = {"kind": "resume", "session_id": payload.session_id}
+        if resolved_cwd:
+            updates["cwd"] = resolved_cwd
+        return payload.model_copy(update=updates)
+
+    if not resolved_cwd:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "app_server_ws job requires project cwd when thread_id is missing. "
+                "Provide payload.cwd to auto-open latest thread or auto-create a new thread."
+            ),
+        )
+
+    latest_thread_id = await _latest_thread_id_for_cwd(
+        resolved_cwd,
+        app_server_url=payload.app_server_url,
+        app_server_bearer_token=payload.app_server_bearer_token,
+    )
+
+    if not latest_thread_id:
+        created = await create_thread(
+            ThreadCreateRequest(
+                cwd=resolved_cwd,
+                model=payload.model,
+                reasoning_effort=payload.reasoning_effort,
+                sandbox=payload.sandbox,
+                approvals=payload.approvals,
+                app_server_url=payload.app_server_url,
+                app_server_bearer_token=payload.app_server_bearer_token,
+                interaction_mode="execution",
+            )
+        )
+        latest_thread_id = created.get("thread_id")
+        if not isinstance(latest_thread_id, str) or not latest_thread_id:
+            raise HTTPException(status_code=502, detail="Failed to create thread for execution context")
+
+    return payload.model_copy(
+        update={
+            "kind": "resume",
+            "session_id": latest_thread_id,
+            "cwd": resolved_cwd,
+        }
     )
 
 
@@ -2088,17 +2127,19 @@ async def post_codex(payload: CodexRequest) -> dict:
         payload.include_events,
         payload.max_events,
     )
-    # Fail fast for invalid cwd in app_server_ws mode.
+    resolved_payload = payload
+    # Normalize thread context and fail fast for invalid cwd in app_server_ws mode.
     if payload.backend == "app_server_ws":
-        _validate_app_server_cwd(payload.cwd)
-        if payload.kind == "resume" and payload.session_id:
-            pending_jobs = _thread_pending_jobs(payload.session_id)
+        resolved_payload = await _resolve_job_payload_thread_context(payload)
+        _validate_app_server_cwd(resolved_payload.cwd)
+        if resolved_payload.kind == "resume" and resolved_payload.session_id:
+            pending_jobs = _thread_pending_jobs(resolved_payload.session_id)
             if pending_jobs:
-                _raise_pending_events_conflict(payload.session_id, pending_jobs)
+                _raise_pending_events_conflict(resolved_payload.session_id, pending_jobs)
     # Keep sync API for compatibility, but avoid proxy timeouts:
     # run as background job and wait a short window for completion.
-    if payload.backend == "app_server_ws":
-        job = _create_job(payload)
+    if resolved_payload.backend == "app_server_ws":
+        job = _create_job(resolved_payload)
         job_id = job["job_id"]
         try:
             await asyncio.wait_for(job["done_event"].wait(), timeout=CODEX_SYNC_MAX_WAIT_SECONDS)
@@ -2121,7 +2162,7 @@ async def post_codex(payload: CodexRequest) -> dict:
                     "job": format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False),
                 },
             )
-    return await _execute_codex(payload)
+    return await _execute_codex(resolved_payload)
 
 
 async def _execute_codex(payload: CodexRequest) -> dict:
@@ -2397,12 +2438,11 @@ def _create_job(payload: CodexRequest) -> dict:
 
 @app.post("/codex/jobs")
 async def create_codex_job(request: CodexJobRequest) -> dict:
-    payload = request.payload
-    _require_resumed_thread_for_job(payload)
+    payload = await _resolve_job_payload_thread_context(request.payload)
     pending_jobs = _thread_pending_jobs(payload.session_id)
     if pending_jobs:
         _raise_pending_events_conflict(payload.session_id, pending_jobs)
-    job = _create_job(request.payload)
+    job = _create_job(payload)
     return format_job_view(job, poll_after_seconds=JOB_POLL_AFTER_SECONDS, to_iso=_to_iso, include_result=False)
 
 
