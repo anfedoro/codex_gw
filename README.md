@@ -209,7 +209,7 @@ The imported GPT OpenAPI is intentionally minimal:
 - `getCodexJobResult`
 
 Dynamic capabilities:
-- `GET /capabilities` returns runtime function catalog in OpenAI function-style objects.
+- `GET /capabilities` returns runtime `request_patch` in OpenAI Responses API format (`input` + `tools`).
 - Capability rules are encoded in each function `description`.
 - GPT should refresh capabilities before write/admin steps and after recoverable errors.
 

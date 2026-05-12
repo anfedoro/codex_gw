@@ -115,109 +115,107 @@ def _capability_tools() -> list[dict]:
     return [
         {
             "type": "function",
-            "function": {
-                "name": "project.bootstrap",
-                "description": (
-                    "Create a new project directory and optionally initialize git. "
-                    "Use when target project folder does not exist yet. "
-                    "Confirmation: required for write/admin operations."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "project_name": {"type": "string"},
-                        "base_path": {"type": ["string", "null"]},
-                        "git_init": {"type": "boolean", "default": True},
-                    },
-                    "required": ["project_name"],
-                    "additionalProperties": False,
+            "name": "project.bootstrap",
+            "description": (
+                "Create a new project directory and optionally initialize git. "
+                "Use when target project folder does not exist yet. "
+                "Confirmation: required for write/admin operations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_name": {"type": "string"},
+                    "base_path": {"type": ["string", "null"]},
+                    "git_init": {"type": "boolean", "default": True},
                 },
+                "required": ["project_name"],
+                "additionalProperties": False,
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "project.list",
-                "description": (
-                    "List known projects from state DB. "
-                    "Use before selecting working context if project path is unknown."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 200},
-                        "existing_only": {"type": "boolean", "default": True},
-                    },
-                    "additionalProperties": False,
+            "name": "project.list",
+            "description": (
+                "List known projects from state DB. "
+                "Use before selecting working context if project path is unknown."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 200},
+                    "existing_only": {"type": "boolean", "default": True},
                 },
+                "additionalProperties": False,
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "thread.list",
-                "description": (
-                    "List threads, optionally by cwd. "
-                    "Use to select existing context before resume jobs."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "cwd": {"type": ["string", "null"]},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 100},
-                        "existing_only": {"type": "boolean", "default": True},
-                    },
-                    "additionalProperties": False,
+            "name": "thread.list",
+            "description": (
+                "List threads, optionally by cwd. "
+                "Use to select existing context before resume jobs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cwd": {"type": ["string", "null"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 100},
+                    "existing_only": {"type": "boolean", "default": True},
                 },
+                "additionalProperties": False,
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "thread.create",
-                "description": (
-                    "Create a new thread context without running a turn. "
-                    "Use when no suitable thread exists or explicit new thread is requested. "
-                    "Confirmation: required."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "cwd": {"type": ["string", "null"]},
-                        "model": {"type": ["string", "null"]},
-                        "reasoning_effort": {
-                            "type": ["string", "null"],
-                            "enum": ["low", "medium", "high", "xhigh"],
-                        },
-                        "sandbox": {"type": ["string", "null"]},
-                        "approvals": {"type": ["string", "null"]},
-                        "app_server_url": {"type": ["string", "null"]},
-                        "app_server_bearer_token": {"type": ["string", "null"]},
-                        "interaction_mode": {
-                            "type": "string",
-                            "enum": ["execution", "planning"],
-                            "default": "execution",
-                        },
+            "name": "thread.create",
+            "description": (
+                "Create a new thread context without running a turn. "
+                "Use when no suitable thread exists or explicit new thread is requested. "
+                "Confirmation: required."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cwd": {"type": ["string", "null"]},
+                    "model": {"type": ["string", "null"]},
+                    "reasoning_effort": {
+                        "type": ["string", "null"],
+                        "enum": ["low", "medium", "high", "xhigh"],
                     },
-                    "additionalProperties": False,
+                    "sandbox": {"type": ["string", "null"]},
+                    "approvals": {"type": ["string", "null"]},
+                    "app_server_url": {"type": ["string", "null"]},
+                    "app_server_bearer_token": {"type": ["string", "null"]},
+                    "interaction_mode": {
+                        "type": "string",
+                        "enum": ["execution", "planning"],
+                        "default": "execution",
+                    },
                 },
+                "additionalProperties": False,
             },
         },
     ]
 
 
-def _capability_developer_message() -> dict:
+def _capability_developer_input_item() -> dict:
     return {
+        "type": "message",
         "role": "developer",
-        "content": (
-            "This is a dynamic function catalog for Codex Gateway control. "
-            "Use only functions from tools list. "
-            "Select function by user intent and each function description. "
-            "Always keep and pass current working project directory and thread id for actions. "
-            "If thread id is missing, gateway should auto-open latest thread for cwd or auto-create a new one. "
-            "Do not invent missing functions. "
-            "If requested capability is missing, report it and ask for an alternative."
-        ),
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "This is a dynamic function catalog for Codex Gateway control. "
+                    "Use only functions from tools list. "
+                    "Select function by user intent and each function description. "
+                    "Always keep and pass current working project directory and thread id for actions. "
+                    "If thread id is missing, gateway should auto-open latest thread for cwd or auto-create a new one. "
+                    "Do not invent missing functions. "
+                    "If requested capability is missing, report it and ask for an alternative."
+                ),
+            }
+        ],
     }
 
 
@@ -1468,11 +1466,11 @@ async def get_capabilities() -> dict:
         "status": "ok",
         "version": "2026-05-10",
         "request_patch": {
-            "messages": [_capability_developer_message()],
+            "input": [_capability_developer_input_item()],
             "tools": tools,
         },
         "tool_count": len(tools),
-        "notes": "Request patch contains developer message and dynamic tools in OpenAI request format.",
+        "notes": "Request patch contains Responses API-compatible input and function tools.",
     }
 
 

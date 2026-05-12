@@ -1430,7 +1430,7 @@
           "request_patch": {
             "type": "object",
             "properties": {
-              "messages": {
+              "input": {
                 "type": "array",
                 "items": {
                   "type": "object",
@@ -1446,7 +1446,7 @@
               }
             },
             "required": [
-              "messages",
+              "input",
               "tools"
             ],
             "additionalProperties": true

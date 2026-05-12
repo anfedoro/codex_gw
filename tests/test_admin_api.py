@@ -44,12 +44,14 @@ def test_get_capabilities_returns_request_patch() -> None:
     assert body["status"] == "ok"
     assert isinstance(body["version"], str)
     patch = body["request_patch"]
-    assert isinstance(patch.get("messages"), list)
+    assert isinstance(patch.get("input"), list)
     assert isinstance(patch.get("tools"), list)
-    assert patch["messages"][0]["role"] == "developer"
-    assert "dynamic function catalog" in patch["messages"][0]["content"]
+    assert patch["input"][0]["type"] == "message"
+    assert patch["input"][0]["role"] == "developer"
+    assert "dynamic function catalog" in patch["input"][0]["content"][0]["text"]
     assert patch["tools"][0]["type"] == "function"
-    assert isinstance(patch["tools"][0]["function"], dict)
+    assert isinstance(patch["tools"][0]["name"], str)
+    assert isinstance(patch["tools"][0]["parameters"], dict)
     assert isinstance(body["tool_count"], int)
 
 
