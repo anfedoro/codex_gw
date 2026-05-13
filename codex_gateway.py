@@ -47,7 +47,7 @@ from cgw.protocol_registry import ProtocolRegistryError, build_registry_with_gen
 from cgw.text_utils import clip_text, short_text, tail_file
 
 
-app = FastAPI(title="Codex Gateway", version="1.0.0")
+app = FastAPI(title="Codex Gateway", version="1.1.0")
 LOGGER = logging.getLogger("codex_gateway")
 
 # Mutable runtime config, initialized from env and overridden by CLI args.
@@ -909,7 +909,7 @@ async def _app_server_rpc(
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "initialize",
-                    "params": {"clientInfo": {"name": "codex-gateway", "version": "1.0.0"}},
+                    "params": {"clientInfo": {"name": "codex-gateway", "version": "1.1.0"}},
                 }
             )
         )
@@ -1402,7 +1402,7 @@ async def _run_codex_via_app_server_ws(
             {
                 "id": init_id,
                 "method": "initialize",
-                "params": {"clientInfo": {"name": "codex-gateway", "version": "1.0.0"}},
+                "params": {"clientInfo": {"name": "codex-gateway", "version": "1.1.0"}},
             },
         )
         init_result = await wait_for_response(ws, init_id)
