@@ -202,6 +202,8 @@ Structured lifecycle logs:
 The imported GPT OpenAPI is intentionally minimal:
 - `getGatewayHealth`
 - `getCapabilities`
+- `getContextOptions`
+- `switchProjectContext`
 - `createCodexJob`
 - `getCodexJob`
 - `getCodexJobEvents`

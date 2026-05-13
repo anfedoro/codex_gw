@@ -115,6 +115,61 @@ def _capability_tools() -> list[dict]:
     return [
         {
             "type": "function",
+            "name": "getContextOptions",
+            "description": (
+                "Read-only context discovery for project/thread selection. "
+                "Returns projects sorted by recent activity, each with most recent thread preview, "
+                "plus thread options for selected project. Use this first for 'select/open project/thread' requests."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": ["string", "null"]},
+                    "project_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+                    "thread_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "switchProjectContext",
+            "description": (
+                "Select/switch active project context and choose thread strategy: reuse latest or create new. "
+                "Use after presenting options from getContextOptions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "thread_policy": {
+                        "type": "string",
+                        "enum": ["reuse_latest", "create_new"],
+                        "default": "reuse_latest",
+                    },
+                    "create_project_if_missing": {"type": "boolean", "default": True},
+                    "model": {"type": ["string", "null"]},
+                    "reasoning_effort": {
+                        "type": ["string", "null"],
+                        "enum": ["low", "medium", "high", "xhigh"],
+                    },
+                    "sandbox": {
+                        "type": ["string", "null"],
+                        "enum": ["read-only", "workspace-write", "danger-full-access"],
+                    },
+                    "approvals": {"type": ["string", "null"]},
+                    "interaction_mode": {
+                        "type": "string",
+                        "enum": ["execution", "planning"],
+                        "default": "execution",
+                    },
+                },
+                "required": ["project_path"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
             "name": "project.bootstrap",
             "description": (
                 "Create a new project directory and optionally initialize git. "
@@ -638,6 +693,21 @@ async def _resolve_job_payload_thread_context(payload: CodexRequest) -> CodexReq
         app_server_bearer_token=payload.app_server_bearer_token,
     )
 
+    if latest_thread_id:
+        # Validate that discovered thread id is runnable in app-server resume flow.
+        try:
+            await _app_server_thread_resume(
+                latest_thread_id,
+                exclude_turns=True,
+                app_server_url=payload.app_server_url,
+                app_server_bearer_token=payload.app_server_bearer_token,
+            )
+        except HTTPException as exc:
+            if _is_no_rollout_error(exc.detail):
+                latest_thread_id = None
+            else:
+                raise
+
     if not latest_thread_id:
         created = await create_thread(
             ThreadCreateRequest(
@@ -903,6 +973,8 @@ def _thread_item_from_codex(thread: dict, *, preview_limit: int = 220, first_lim
     display_base = title or first_msg or thread_id
     project_name = Path(cwd).name if cwd else None
     display_name = f"{project_name or 'project'}: {short_text(display_base, 90)}"
+    created_at_ts = thread.get("createdAt") if isinstance(thread.get("createdAt"), int) else None
+    updated_at_ts = thread.get("updatedAt") if isinstance(thread.get("updatedAt"), int) else None
     return {
         "thread_id": thread_id,
         "short_thread_id": thread_id[:8],
@@ -912,8 +984,10 @@ def _thread_item_from_codex(thread: dict, *, preview_limit: int = 220, first_lim
         "preview": preview,
         "display_name": display_name,
         "cwd": cwd,
-        "created_at": _to_iso(thread.get("createdAt") if isinstance(thread.get("createdAt"), int) else None),
-        "updated_at": _to_iso(thread.get("updatedAt") if isinstance(thread.get("updatedAt"), int) else None),
+        "created_at": _to_iso(created_at_ts),
+        "updated_at": _to_iso(updated_at_ts),
+        "created_at_human": _to_human_utc(created_at_ts),
+        "updated_at_human": _to_human_utc(updated_at_ts),
         "model_provider": thread.get("modelProvider"),
         "model": None,
         "reasoning_effort": None,
@@ -1005,6 +1079,15 @@ def _to_iso(ts: int | None) -> str | None:
         return None
     try:
         return datetime.fromtimestamp(int(ts), tz=UTC).isoformat()
+    except Exception:
+        return None
+
+
+def _to_human_utc(ts: int | None) -> str | None:
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return None
 
@@ -1677,6 +1760,83 @@ async def list_threads(
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     ]
     return {"source": "codex_thread_list", "data": data}
+
+
+@app.get("/context/options")
+async def get_context_options(
+    project_path: str | None = Query(default=None, description="Optional project cwd to preselect"),
+    project_limit: int = Query(default=20, ge=1, le=200),
+    thread_limit: int = Query(default=20, ge=1, le=200),
+) -> dict:
+    result = await _app_server_rpc(
+        "thread/list",
+        {"archived": False, "limit": 5000, "sortKey": "updated_at", "sortDirection": "desc"},
+    )
+    raw_threads = result.get("data", []) if isinstance(result.get("data"), list) else []
+    thread_items: list[dict] = []
+    for item in raw_threads:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        thread_items.append(_thread_item_from_codex(item))
+
+    by_cwd: dict[str, list[dict]] = {}
+    for item in thread_items:
+        cwd = str(item.get("cwd") or "").strip()
+        if not cwd:
+            continue
+        by_cwd.setdefault(cwd, []).append(item)
+
+    projects: list[dict] = []
+    for cwd, items in by_cwd.items():
+        sorted_items = sorted(items, key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+        head = sorted_items[0]
+        projects.append(
+            {
+                **_project_item(cwd, thread_count=len(sorted_items), last_updated_at=head.get("updated_at")),
+                "last_updated_human": head.get("updated_at_human"),
+                "most_recent_thread": {
+                    "thread_id": head.get("thread_id"),
+                    "updated_at": head.get("updated_at"),
+                    "updated_at_human": head.get("updated_at_human"),
+                    "preview": head.get("preview"),
+                    "display_name": head.get("display_name"),
+                },
+            }
+        )
+
+    projects_sorted = sorted(projects, key=lambda x: str(x.get("last_updated_at") or ""), reverse=True)
+    if project_path and project_path.strip():
+        selected_cwd = _resolve_project_cwd(project_path)
+    elif projects_sorted:
+        selected_cwd = str(projects_sorted[0].get("cwd") or "")
+    else:
+        selected_cwd = None
+
+    selected_threads: list[dict] = []
+    if selected_cwd:
+        selected_threads = sorted(
+            by_cwd.get(selected_cwd, []),
+            key=lambda x: str(x.get("updated_at") or ""),
+            reverse=True,
+        )[:thread_limit]
+
+    selected_project = next((p for p in projects_sorted if p.get("cwd") == selected_cwd), None)
+    suggested_thread = selected_threads[0] if selected_threads else None
+    return {
+        "status": "ok",
+        "generated_at": _to_iso(job_now()),
+        "selected_project_cwd": selected_cwd,
+        "selected_project": selected_project,
+        "suggested_thread": suggested_thread,
+        "project_count": len(projects_sorted),
+        "projects": projects_sorted[:project_limit],
+        "thread_count": len(selected_threads),
+        "threads": selected_threads,
+        "selection_hint": (
+            "Use switchProjectContext with selected project_path. "
+            "Default is reuse_latest thread policy; use create_new only when explicitly requested."
+        ),
+    }
 
 
 async def _latest_thread_id_for_cwd(

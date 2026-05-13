@@ -44,6 +44,8 @@ def test_gpt_action_schema_operations_include_core_and_dynamic_flow() -> None:
     expected = {
         "getGatewayHealth",
         "getCapabilities",
+        "getContextOptions",
+        "switchProjectContext",
         "createCodexJob",
         "getCodexJob",
         "getCodexJobEvents",

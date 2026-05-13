@@ -1464,6 +1464,69 @@
           "request_patch"
         ],
         "additionalProperties": true
+      },
+      "ContextOptionsResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "generated_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selected_project_cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selected_project": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "suggested_thread": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "project_count": {
+            "type": "integer"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "thread_count": {
+            "type": "integer"
+          },
+          "threads": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "selection_hint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "projects",
+          "threads"
+        ],
+        "additionalProperties": true
       }
     }
   },
@@ -1502,6 +1565,84 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/context/options": {
+      "get": {
+        "operationId": "getContextOptions",
+        "summary": "Get project/thread selection options with most recent context previews",
+        "parameters": [
+          {
+            "name": "project_path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 20
+            }
+          },
+          {
+            "name": "thread_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextOptionsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/context/switch": {
+      "post": {
+        "operationId": "switchProjectContext",
+        "summary": "Switch project context and pick thread policy (reuse latest or create new)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchProjectContextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Context switched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchProjectContextResponse"
                 }
               }
             }
